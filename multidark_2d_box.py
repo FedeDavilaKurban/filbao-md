@@ -31,7 +31,7 @@ L = 1000.0                     # box size in Mpc/h (hardcoded)
 h = 1                          # H0 = 100, so h = 1
 mag_max = -21.5                 # absolute magnitude cut
 ran_method = 'random_choice'    # for 3D box we can simply choose uniform random points
-test_dilute = 0.5   
+test_dilute = 1   
 
 # ------ Weighting options ------
 use_dec_weights = False         # no declination weights in 3D box

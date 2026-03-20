@@ -25,22 +25,22 @@ from astropy.table import Table
 # PARAMETERS
 # ---------------------------
 
-force_recompute_full = False
-force_recompute_bin = False
+force_recompute_full = True
+force_recompute_bin = True
 
 # ---- Sample ----------
 lightcone_filename = '../data/lightcone_real_and_rsd_withfil.csv'
-test_dilute = .5                     # fraction of galaxies to keep (1.0 = full)
+test_dilute = .25                     # fraction of galaxies to keep (1.0 = full)
 h = 1
 zmin, zmax = 0.07, 0.2
 mag_max = -21.2
 ran_method = 'poly'           # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
-    deg = 3
+    deg = 5
 gr_min = 0
 
 # ------ Weighting options ------
-use_dec_weights = True          # Set to False to skip declination weighting
+use_dec_weights = False         # Set to False to skip declination weighting
 
 # ------ 2D correlation function parameters ------
 min_sep_2d = 1.0          # minimum σ, π in Mpc/h
@@ -56,8 +56,8 @@ dist_bin_intervals = [ # used only for "custom_intervals" mode
     [(5, 100)],
 ]
 dist_bin_percentile_intervals  = [ # used only for "percentile_intervals" mode
-    (0, 20),      # a–bth percentile
-    (60, 80)     # c–dth percentile
+    (0, 15),      # a–bth percentile
+    (65, 80)     # c–dth percentile
 ]
 nbins_dist = 4             # used only for percentile / equal_width
 dist_bin_edges = [0, 5, 10, 15, 100] # used only for "fixed"
@@ -68,7 +68,7 @@ nrand_mult = 15              # Nr / Nd
 
 # --- Method for generating RA/Dec ---
 ran_radec_method = 'file'   
-RADec_filepath = '../../data/lss_randoms_combined_cut.csv'
+RADec_filepath = '../../data/lss_randoms_combined_cut_LARGE.csv'
 
 # ------ Output folder --------
 folderName = f'XISIGMAPI_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{ (f"{gr_min:.1f}") if "gr_min" in locals() else "none" }_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
@@ -482,14 +482,14 @@ def compute_xi_sigmapi(ra_data, dec_data, chi_data,
                            weights1=data_weights,
                            weight_type='pair_product',
                            periodic=False, verbose=False)
-        H_dd = (dd_counts['npairs'] * dd_counts['weightavg']).reshape(nbins, pimax)
+        H_dd = dd_counts['npairs'].reshape(nbins, pimax)
 
         rr_counts = DDrppi(1, nthreads, pimax, rp_bins,
                            x_rand, y_rand, z_rand,
                            weights1=rand_weights,
                            weight_type='pair_product',
                            periodic=False, verbose=False)
-        H_rr = (rr_counts['npairs'] * rr_counts['weightavg']).reshape(nbins, pimax)
+        H_rr = rr_counts['npairs'].reshape(nbins, pimax)
 
         dr_counts = DDrppi(0, nthreads, pimax, rp_bins,
                            x_data, y_data, z_data,
@@ -498,7 +498,7 @@ def compute_xi_sigmapi(ra_data, dec_data, chi_data,
                            weights2=rand_weights,
                            weight_type='pair_product',
                            periodic=False, verbose=False)
-        H_dr = (dr_counts['npairs'] * dr_counts['weightavg']).reshape(nbins, pimax)
+        H_dr = dr_counts['npairs'].reshape(nbins, pimax)
 
         max_pimax = (pimax // pi_rebin) * pi_rebin
         H_dd_rebinned = H_dd[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
@@ -528,16 +528,21 @@ def compute_xi_sigmapi(ra_data, dec_data, chi_data,
 
 
     # Normalize to get xi
-    norm_DD = WD*WD - WD2
-    norm_RR = WR*WR - WR2
+    norm_DD = WD*WD
+    norm_RR = WR*WR
     norm_DR = WD*WR
 
     DD = H_dd_rebinned / norm_DD
     RR = H_rr_rebinned / norm_RR
     DR = H_dr_rebinned / norm_DR
 
+    factor = WD / WR
+
     with np.errstate(divide='ignore', invalid='ignore'):
-        xi = (DD - 2*DR + RR) / RR
+        #xi = (DD - 2*DR + RR) / RR
+        xi = (H_dd_rebinned
+            - 2 * factor * H_dr_rebinned
+            + factor**2 * H_rr_rebinned) / (factor**2 * H_rr_rebinned)
         xi[RR == 0] = 0
 
     # Return xi, sigma edges, and max_pimax (needed for π edges)
@@ -746,6 +751,9 @@ def main():
         radec_data = pd.read_csv(RADec_filepath)
         ra_random_file = radec_data["ra"].values
         dec_random_file = radec_data["dec"].values
+        idx = np.random.permutation(len(ra_random_file))
+        ra_random_file = ra_random_file[idx]
+        dec_random_file = dec_random_file[idx]
         print(f"Loaded {len(ra_random_file)} random RA/Dec points")
     else:
         ra_random_file = dec_random_file = None
