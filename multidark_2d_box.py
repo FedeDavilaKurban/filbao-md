@@ -23,7 +23,7 @@ from astropy.table import Table
 # PARAMETERS
 # ---------------------------
 
-force_recompute_full = False
+force_recompute_full = True
 force_recompute_bin = True
 
 # ---- Sample ----------
@@ -31,7 +31,7 @@ L = 1000.0                     # box size in Mpc/h (hardcoded)
 h = 1                          # H0 = 100, so h = 1
 mag_max = -21.5                 # absolute magnitude cut
 ran_method = 'random_choice'    # for 3D box we can simply choose uniform random points
-test_dilute = 1   
+test_dilute = .5   
 
 # ------ Weighting options ------
 use_dec_weights = False         # no declination weights in 3D box
@@ -52,7 +52,7 @@ nbins_dist = 4                   # used only for percentile / equal_width
 dist_bin_edges = [0, 5, 10, 15, 100]  # used only for "fixed"
 
 # ------ Random catalog parameters ------
-nrand_mult = 15                  # Nr / Nd
+nrand_mult = 10                  # Nr / Nd
 
 # ------ Output folder --------
 folderName = f'XISIGMAPI_3Dbox_mag{mag_max:.1f}_nrand{nrand_mult}'
@@ -72,7 +72,7 @@ os.makedirs(monopoles_dir, exist_ok=True)
 # ---------------------------
 # COSMOLOGY (not used but kept for compatibility)
 # ---------------------------
-cosmo = FlatLambdaCDM(H0=h * 100, Om0=0.3089)
+cosmo = FlatLambdaCDM(H0=h * 100, Om0=0.31)
 
 # ---------------------------
 # GENERAL HELPER FUNCTIONS (unchanged)

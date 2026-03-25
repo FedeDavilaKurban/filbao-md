@@ -30,7 +30,7 @@ force_recompute_bin = True
 
 # ---- Sample ----------
 lightcone_filename = '../data/lightcone_real_and_rsd_withfil.csv'
-test_dilute = .25                     # fraction of galaxies to keep (1.0 = full)
+test_dilute = .5                     # fraction of galaxies to keep (1.0 = full)
 h = 1
 zmin, zmax = 0.07, 0.2
 mag_max = -21.2
@@ -56,8 +56,8 @@ dist_bin_intervals = [ # used only for "custom_intervals" mode
     [(5, 100)],
 ]
 dist_bin_percentile_intervals  = [ # used only for "percentile_intervals" mode
-    (0, 15),      # a–bth percentile
-    (65, 80)     # c–dth percentile
+    (0, 20),      # a–bth percentile
+    (60, 80)     # c–dth percentile
 ]
 nbins_dist = 4             # used only for percentile / equal_width
 dist_bin_edges = [0, 5, 10, 15, 100] # used only for "fixed"
@@ -88,7 +88,7 @@ os.makedirs(monopoles_dir, exist_ok=True)
 # ---------------------------
 # COSMOLOGY
 # ---------------------------
-cosmo = FlatLambdaCDM(H0=h * 100, Om0=0.3089)
+cosmo = FlatLambdaCDM(H0=h * 100, Om0=0.31)
 
 # ---------------------------
 # GENERAL HELPER FUNCTIONS
