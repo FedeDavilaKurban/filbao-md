@@ -528,21 +528,19 @@ def compute_xi_sigmapi(ra_data, dec_data, chi_data,
 
 
     # Normalize to get xi
-    norm_DD = WD*WD
-    norm_RR = WR*WR
+    norm_DD = WD*WD - WD2
+    norm_RR = WR*WR - WR2
     norm_DR = WD*WR
 
     DD = H_dd_rebinned / norm_DD
     RR = H_rr_rebinned / norm_RR
     DR = H_dr_rebinned / norm_DR
 
-    factor = WD / WR
 
     with np.errstate(divide='ignore', invalid='ignore'):
         #xi = (DD - 2*DR + RR) / RR
-        xi = (H_dd_rebinned
-            - 2 * factor * H_dr_rebinned
-            + factor**2 * H_rr_rebinned) / (factor**2 * H_rr_rebinned)
+        xi = (DD - 2*DR + RR) / RR
+
         xi[RR == 0] = 0
 
     # Return xi, sigma edges, and max_pimax (needed for π edges)
