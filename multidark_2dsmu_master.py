@@ -22,18 +22,18 @@ import cartopy.crs as ccrs   # needed for lightcone skymap, safe to import alway
 # MODE SELECTION
 # ================================
 MODE = "lightcone"          # "lightcone" or "box"
-test_dilute = .5
+test_dilute = .3
 # ================================
 # COMMON PARAMETERS
 # ================================
 force_recompute_full = False
 force_recompute_bin = False
 
-# ---- 2D correlation function parameters ------
-min_sep_2d = 1.0          # minimum σ, π in Mpc/h
+# ---- 2D correlation function parameters (now s,mu) ------
+min_sep_2d = 1.0          # minimum s in Mpc/h
 max_sep_2d = 150.0
 bin_size_2d = 3.0
-pi_rebin = 3                # rebin factor for π direction
+# mu bins will be set to the same number as s bins (no rebinning)
 
 # ------ dist_fil binning ------
 dist_bin_mode = "percentile_intervals"
@@ -139,8 +139,6 @@ def get_paircounts_filename(bin_name, params):
         parts.append(f"sep={params['min_sep_2d']}-{params['max_sep_2d']}")
     if 'bin_size_2d' in params:
         parts.append(f"bin={params['bin_size_2d']}")
-    if 'pi_rebin' in params:
-        parts.append(f"pi_rebin={params['pi_rebin']}")
     if 'nrand_mult' in params:
         parts.append(f"nrand={params['nrand_mult']}")
     if 'ran_radec_method' in params:
@@ -436,23 +434,21 @@ def plot_bin_data_and_randoms(gxs, rxs, label, plotname):
         save_figure(fig, plotname, dpi=200)
 
 # ================================
-# 2D CORRELATION FUNCTION
+# 2D CORRELATION FUNCTION (xi(s, mu))
 # ================================
-def compute_xi_sigmapi(x_data, y_data, z_data,
-                       x_rand, y_rand, z_rand,
-                       pi_rebin,
-                       data_weights=None, rand_weights=None,
-                       min_sep=0.0, max_sep=50.0, bin_size=2.0,
-                       paircounts_file=None, force_recompute=False,
-                       dfil_bin_metadata=None):
+def compute_xi_s_mu(x_data, y_data, z_data,
+                    x_rand, y_rand, z_rand,
+                    data_weights=None, rand_weights=None,
+                    min_sep=0.0, max_sep=50.0, bin_size=2.0,
+                    paircounts_file=None, force_recompute=False,
+                    dfil_bin_metadata=None):
     """
-    Compute ξ(σ, π) using Corrfunc.
-    If MODE == "box", the calculation is periodic with boxsize L.
-    If MODE == "lightcone", it is non‑periodic.
+    Compute ξ(s, μ) using Corrfunc's DDsmu.
+    Number of μ bins is set equal to number of s bins.
     """
     import multiprocessing
     try:
-        from Corrfunc.theory.DDrppi import DDrppi
+        from Corrfunc.theory.DDsmu import DDsmu
     except ImportError:
         raise ImportError("Corrfunc is not installed. Please run: conda install -c conda-forge corrfunc")
 
@@ -464,71 +460,74 @@ def compute_xi_sigmapi(x_data, y_data, z_data,
     periodic = (MODE == "box")
     boxsize = L if periodic else None
 
+    # Define s and mu bins (same number of bins)
+    nbins_s = int((max_sep - min_sep) / bin_size)
+    s_bins = np.linspace(min_sep, max_sep, nbins_s + 1)
+    nbins_mu = nbins_s
+    mu_max = 1.0
+    nmu_bins = nbins_mu
+
+    nthreads = min(multiprocessing.cpu_count(), 16)
+
     # Try to load precomputed pair counts
     if paircounts_file and os.path.exists(paircounts_file) and not force_recompute:
         print(f"Loading precomputed pair counts from {paircounts_file}")
         data = np.load(paircounts_file)
-        rp_bins = data['rp_bins']
-        pi_rebin = data['pi_rebin']
-        max_pimax = data['max_pimax']
-        H_dd_rebinned = data['H_dd_rebinned']
-        H_dr_rebinned = data['H_dr_rebinned']
-        H_rr_rebinned = data['H_rr_rebinned']
+        s_bins = data['s_bins']
+        mu_bins = data['mu_bins']
+        H_dd = data['H_dd']
+        H_dr = data['H_dr']
+        H_rr = data['H_rr']
         WD = data['WD']
         WR = data['WR']
         WD2 = data['WD2']
         WR2 = data['WR2']
+        nbins_s = len(s_bins) - 1
+        nbins_mu = len(mu_bins) - 1
     else:
-        nbins = int((max_sep - min_sep) / bin_size)
-        rp_bins = np.linspace(min_sep, max_sep, nbins + 1)
-        pimax = int(max_sep)
-        nthreads = min(multiprocessing.cpu_count(), 16)
+        # Compute pair counts
+        dd_counts = DDsmu(1, nthreads, s_bins, mu_max, nmu_bins,
+                          x_data, y_data, z_data,
+                          weights1=data_weights,
+                          weight_type='pair_product',
+                          periodic=periodic, boxsize=boxsize,
+                          verbose=False, output_savg=False)
+        H_dd = dd_counts['npairs'].reshape(nbins_s, nbins_mu).astype(np.float64)
 
-        # Weighted pair counts: using weight_type='pair_product'
-        dd_counts = DDrppi(1, nthreads, pimax, rp_bins,
-                        x_data, y_data, z_data,
-                        weights1=data_weights,
-                        weight_type='pair_product',
-                        periodic=periodic, boxsize=boxsize, verbose=False)
-        H_dd = dd_counts['npairs'].reshape(nbins, pimax).astype(np.float64)
+        rr_counts = DDsmu(1, nthreads, s_bins, mu_max, nmu_bins,
+                          x_rand, y_rand, z_rand,
+                          weights1=rand_weights,
+                          weight_type='pair_product',
+                          periodic=periodic, boxsize=boxsize,
+                          verbose=False, output_savg=False)
+        H_rr = rr_counts['npairs'].reshape(nbins_s, nbins_mu).astype(np.float64)
 
-        rr_counts = DDrppi(1, nthreads, pimax, rp_bins,
-                        x_rand, y_rand, z_rand,
-                        weights1=rand_weights,
-                        weight_type='pair_product',
-                        periodic=periodic, boxsize=boxsize, verbose=False)
-        H_rr = rr_counts['npairs'].reshape(nbins, pimax).astype(np.float64)
-
-        dr_counts = DDrppi(0, nthreads, pimax, rp_bins,
-                        x_data, y_data, z_data,
-                        X2=x_rand, Y2=y_rand, Z2=z_rand,
-                        weights1=data_weights,
-                        weights2=rand_weights,
-                        weight_type='pair_product',
-                        periodic=periodic, boxsize=boxsize, verbose=False)
-        H_dr = dr_counts['npairs'].reshape(nbins, pimax).astype(np.float64)
-
-        # Rebin
-        max_pimax = (pimax // pi_rebin) * pi_rebin
-        H_dd_rebinned = H_dd[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
-        H_dr_rebinned = H_dr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
-        H_rr_rebinned = H_rr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
+        dr_counts = DDsmu(0, nthreads, s_bins, mu_max, nmu_bins,
+                          x_data, y_data, z_data,
+                          X2=x_rand, Y2=y_rand, Z2=z_rand,
+                          weights1=data_weights, weights2=rand_weights,
+                          weight_type='pair_product',
+                          periodic=periodic, boxsize=boxsize,
+                          verbose=False, output_savg=False)
+        H_dr = dr_counts['npairs'].reshape(nbins_s, nbins_mu).astype(np.float64)
 
         WD = np.sum(data_weights)
         WR = np.sum(rand_weights)
         WD2 = np.sum(data_weights**2)
         WR2 = np.sum(rand_weights**2)
 
+        # Build mu bins for storage (evenly spaced from 0 to mu_max)
+        mu_bins = np.linspace(0.0, mu_max, nmu_bins + 1)
+
         if paircounts_file:
             print(f"Saving pair counts to {paircounts_file}")
             os.makedirs(os.path.dirname(paircounts_file), exist_ok=True)
             save_dict = {
-                'rp_bins': rp_bins,
-                'pi_rebin': pi_rebin,
-                'max_pimax': max_pimax,
-                'H_dd_rebinned': H_dd_rebinned,
-                'H_dr_rebinned': H_dr_rebinned,
-                'H_rr_rebinned': H_rr_rebinned,
+                's_bins': s_bins,
+                'mu_bins': mu_bins,
+                'H_dd': H_dd,
+                'H_dr': H_dr,
+                'H_rr': H_rr,
                 'WD': WD, 'WR': WR, 'WD2': WD2, 'WR2': WR2,
             }
             if dfil_bin_metadata is not None:
@@ -540,9 +539,9 @@ def compute_xi_sigmapi(x_data, y_data, z_data,
     norm_RR = (WR*WR - WR2)
     norm_DR = WD * WR
 
-    DD = H_dd_rebinned / norm_DD
-    RR = H_rr_rebinned / norm_RR
-    DR = H_dr_rebinned / norm_DR
+    DD = H_dd / norm_DD
+    RR = H_rr / norm_RR
+    DR = H_dr / norm_DR
 
     with np.errstate(divide='ignore', invalid='ignore'):
         xi = (DD - 2*DR + RR) / RR
@@ -550,22 +549,33 @@ def compute_xi_sigmapi(x_data, y_data, z_data,
 
     # Diagnostic prints
     print('DIAGNOSTICS:')
-    print(f"Sum H_dd_rebinned = {np.sum(H_dd_rebinned):.3e}")
-    print(f"norm_DD = {norm_DD:.3e}  ratio = {np.sum(H_dd_rebinned)/norm_DD:.6f}")
-    print(f"Sum H_rr_rebinned = {np.sum(H_rr_rebinned):.3e}")
-    print(f"norm_RR = {norm_RR:.3e}  ratio = {np.sum(H_rr_rebinned)/norm_RR:.6f}")
-    print(f"Sum H_dr_rebinned = {np.sum(H_dr_rebinned):.3e}")
-    print(f"norm_DR = {norm_DR:.3e}  ratio = {np.sum(H_dr_rebinned)/norm_DR:.6f}")
+    print(f"Sum H_dd = {np.sum(H_dd):.3e}")
+    print(f"norm_DD = {norm_DD:.3e}  ratio = {np.sum(H_dd)/norm_DD:.6f}")
+    print(f"Sum H_rr = {np.sum(H_rr):.3e}")
+    print(f"norm_RR = {norm_RR:.3e}  ratio = {np.sum(H_rr)/norm_RR:.6f}")
+    print(f"Sum H_dr = {np.sum(H_dr):.3e}")
+    print(f"norm_DR = {norm_DR:.3e}  ratio = {np.sum(H_dr)/norm_DR:.6f}")
 
-    return xi, rp_bins, max_pimax
+    return xi, s_bins, mu_bins
 
-def plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin,
-                    title=None, output_folder=None, plotname="xi_sigma_pi.png",
-                    min_sep=0.0, vmin_global=None, vmax_global=None):
-    pi_edges_rebinned = np.arange(0, max_pimax + pi_rebin, pi_rebin)
-    X, Y = np.meshgrid(sigma_edges, pi_edges_rebinned)
-    C = xi.T
+def plot_xi_s_mu(xi, s_edges, mu_edges,
+                 title=None, output_folder=None, plotname="xi_s_mu.png",
+                 min_sep=0.0, vmin_global=None, vmax_global=None):
+    """
+    Plot ξ(s, μ) as a 2D colormesh.
+    xi : 2D array of shape (nbins_s, nbins_mu)
+    s_edges : 1D array of length nbins_s+1
+    mu_edges : 1D array of length nbins_mu+1
+    """
+    # Create meshgrid from edges (for pcolormesh)
+    X, Y = np.meshgrid(s_edges, mu_edges)
+    C = xi.T  # shape (nbins_mu, nbins_s)
 
+    # Compute centers for axis labeling (optional)
+    s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
+    mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
+
+    # Set color scale
     linthresh = 0.001
     if vmin_global is not None and vmax_global is not None:
         vmin = vmin_global
@@ -581,30 +591,22 @@ def plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin,
     norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=vmin, vmax=vmax)
 
     fig, ax = plt.subplots(figsize=(7, 6))
+    # Use pcolormesh with edges and shading='flat'
     im = ax.pcolormesh(X, Y, C, shading='flat', cmap='plasma', norm=norm)
-    ax.set_xlabel(r'$\sigma$ [$h^{-1}$ Mpc]')
-    ax.set_ylabel(r'$\pi$ [$h^{-1}$ Mpc]')
-    ax.set_title(title if title else r'$\xi(\sigma, \pi)$')
+    ax.set_xlabel(r'$s$ [$h^{-1}$ Mpc]')
+    ax.set_ylabel(r'$\mu$')
+    ax.set_title(title if title else r'$\xi(s, \mu)$')
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label(r'$\xi(\sigma,\pi)$')
-
-    sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
-    pi_centers = 0.5 * (pi_edges_rebinned[:-1] + pi_edges_rebinned[1:])
-    Xc, Yc = np.meshgrid(sigma_centers, pi_centers)
-    mask_region = (Xc >= 50) & (Xc <= 150) & (Yc >= 50) & (Yc <= 150)
-    values_region = C[mask_region]
-    if len(values_region) > 0:
-        levels = np.percentile(values_region, [50, 70, 90])
-        ax.contour(Xc, Yc, C, levels=levels, colors='k', linewidths=1.5)
+    cbar.set_label(r'$\xi(s,\mu)$')
 
     ax.set_xlim(left=min_sep)
-    ax.set_ylim(bottom=min_sep)
+    ax.set_ylim(bottom=0, top=1)
 
     if output_folder:
         os.makedirs(output_folder, exist_ok=True)
         outpath = os.path.join(output_folder, plotname)
         fig.savefig(outpath, dpi=200, bbox_inches='tight')
-        print(f"Saved ξ(σ, π) plot to {outpath}")
+        print(f"Saved ξ(s, μ) plot to {outpath}")
     else:
         plt.show()
     plt.close(fig)
@@ -612,47 +614,20 @@ def plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin,
 # ================================
 # MONOPOLE FUNCTIONS
 # ================================
-def compute_monopole(xi, sigma_edges, pi_edges, s_bins=None):
-    sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
-    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
-
-    interp = RegularGridInterpolator(
-        (sigma_centers, pi_centers), xi,
-        bounds_error=False, fill_value=0.0
-    )
-
-    if s_bins is None:
-        max_s = pi_edges[-1]
-        s_bins = sigma_edges[sigma_edges <= max_s]
-        if s_bins[-1] < max_s:
-            s_bins = np.append(s_bins, max_s)
-    s_centers = 0.5 * (s_bins[:-1] + s_bins[1:])
-
-    xi0 = np.zeros_like(s_centers)
-
-    for i, s in enumerate(s_centers):
-        π_max = min(s, pi_edges[-1])
-        if π_max <= 0:
-            xi0[i] = 0.0
-            continue
-
-        n_int = 100
-        π_vals = np.linspace(0, π_max, n_int)
-        σ_vals = np.sqrt(s**2 - π_vals**2)
-
-        points = np.column_stack((σ_vals, π_vals))
-        ξ_vals = interp(points)
-
-        integral = np.trapz(ξ_vals, π_vals)
-        xi0[i] = integral / s
-
-    return s_centers, xi0
+def compute_monopole_from_xi_s_mu(xi, mu_edges):
+    """
+    Compute monopole ξ₀(s) = ∫₀¹ ξ(s, μ) dμ.
+    """
+    mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
+    dmu = mu_centers[1] - mu_centers[0] if len(mu_centers) > 1 else 1.0
+    xi0 = np.trapz(xi, dx=dmu, axis=1)  # integrate along μ dimension
+    return xi0
 
 def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename='xi0_combined.png'):
     fig, ax = plt.subplots(figsize=(8,6))
     colors = plt.cm.tab10.colors
-    for i, ((s, xi0), label) in enumerate(zip(monopoles_list, labels)):
-        ax.plot(s, xi0*s**2, marker='o', linestyle='-', color=colors[i % len(colors)], label=label)
+    for i, ((s_centers, xi0), label) in enumerate(zip(monopoles_list, labels)):
+        ax.plot(s_centers, xi0 * s_centers**2, marker='o', linestyle='-', color=colors[i % len(colors)], label=label)
     ax.set_xlabel(r'$s\,[h^{-1}\mathrm{Mpc}]$')
     ax.set_ylabel(r'$s^{2}\xi_0(s)$')
     ax.set_title('Monopoles ξ₀(s)')
@@ -741,7 +716,6 @@ def main():
     print(f"Distance bin mode: {dist_bin_mode}")
     print(f"Mode parameters: {dist_bin_percentile_intervals if dist_bin_mode == 'percentile_intervals' else (nbins_dist if dist_bin_mode in ['percentile', 'equal_width'] else dist_bin_edges if dist_bin_mode == 'fixed' else 'N/A')}")
 
-
     # ------------------------------------------------------------------
     # Generate random catalogs (mode‑specific)
     # ------------------------------------------------------------------
@@ -777,16 +751,14 @@ def main():
         # Full sample random
         ra_rand_full = master_ra[:nrand_full]
         dec_rand_full = master_dec[:nrand_full]
-        ptr = nrand_full # Pointer to keep track of position in master RA/Dec arrays
+        ptr = nrand_full  # Pointer to keep track of position in master RA/Dec arrays
         red_full = generate_random_red(cat["red"].values, nrand_full, ran_method,
                                        deg if ran_method == "poly" else None)
         random_full = pd.DataFrame({"ra": ra_rand_full, "dec": dec_rand_full, "red": red_full})
         random_full["r"] = cosmo.comoving_distance(random_full["red"].values).value * h
-        # --- ADDED: compute x, y, z ---
         random_full["x"] = random_full["r"] * np.cos(np.radians(random_full["dec"])) * np.cos(np.radians(random_full["ra"]))
         random_full["y"] = random_full["r"] * np.cos(np.radians(random_full["dec"])) * np.sin(np.radians(random_full["ra"]))
         random_full["z"] = random_full["r"] * np.sin(np.radians(random_full["dec"]))
-        # -----------------------------
         if use_dec_weights:
             rand_weights_full = compute_dec_weights(cat["dec"].values, random_full["dec"].values,
                                                     nbins=40, method="kde", alpha=1)
@@ -805,11 +777,9 @@ def main():
                                           deg if ran_method == "poly" else None)
             rand_bin = pd.DataFrame({"ra": ra_bin, "dec": dec_bin, "red": red_bin})
             rand_bin["r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
-            # --- ADDED: compute x, y, z ---
             rand_bin["x"] = rand_bin["r"] * np.cos(np.radians(rand_bin["dec"])) * np.cos(np.radians(rand_bin["ra"]))
             rand_bin["y"] = rand_bin["r"] * np.cos(np.radians(rand_bin["dec"])) * np.sin(np.radians(rand_bin["ra"]))
             rand_bin["z"] = rand_bin["r"] * np.sin(np.radians(rand_bin["dec"]))
-            # -----------------------------
             if use_dec_weights:
                 dec_weights = compute_dec_weights(bin_df["dec"].values, rand_bin["dec"].values,
                                                   nbins=40, method="kde", alpha=1)
@@ -860,9 +830,9 @@ def main():
         plot_radec_distribution(gxs, rxs, subsample=i)
 
     # ------------------------------------------------------------------
-    # First pass: compute ξ(σ, π) for all samples (store xi)
+    # First pass: compute ξ(s, μ) for all samples (store xi)
     # ------------------------------------------------------------------
-    print("\nFirst pass: computing ξ(σ, π) for all samples...")
+    print("\nFirst pass: computing ξ(s, μ) for all samples...")
     all_results = []
 
     # Base parameters for paircounts file naming
@@ -871,7 +841,6 @@ def main():
         'min_sep_2d': min_sep_2d,
         'max_sep_2d': max_sep_2d,
         'bin_size_2d': bin_size_2d,
-        'pi_rebin': pi_rebin,
         'nrand_mult': nrand_mult,
         'dist_bin_mode': dist_bin_mode,
     }
@@ -888,23 +857,21 @@ def main():
     params_full['dist_bin_mode'] = 'full'
     paircounts_file_full = get_paircounts_filename("full", params_full)
 
-    xi_full, rp_bins, max_pimax = compute_xi_sigmapi(
+    xi_full, s_bins, mu_bins = compute_xi_s_mu(
         cat["x"].values, cat["y"].values, cat["z"].values,
         random_full["x"].values, random_full["y"].values, random_full["z"].values,
-        pi_rebin,
         data_weights=cat["weight"].values,
         rand_weights=random_full["weight"].values,
         min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
         paircounts_file=paircounts_file_full,
         force_recompute=force_recompute_full
     )
-    all_results.append( (xi_full, rp_bins, max_pimax, pi_rebin,
-                         rf"$\xi(\sigma, \pi)$ Full Sample", "xi_sigma_pi_full.png") )
+    all_results.append( (xi_full, s_bins, mu_bins,
+                         rf"$\xi(s, \mu)$ Full Sample", "xi_s_mu_full.png") )
 
     # Monopole for full sample
-    n_pi = xi_full.shape[1]
-    pi_edges = np.arange(n_pi + 1) * pi_rebin
-    s_centers, xi0_full = compute_monopole(xi_full, rp_bins, pi_edges)
+    xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins)
+    s_centers = 0.5 * (s_bins[:-1] + s_bins[1:])
     monopoles_list = [(s_centers, xi0_full)]
     labels_list = ['Full Sample']
     monopole_file = os.path.join(monopoles_dir, f"monopole_full_{params_full['dist_bin_mode']}.npz")
@@ -921,10 +888,9 @@ def main():
             'dfil_max': gxs["dist_fil"].max(),
         }
 
-        xi_bin, rp_bins_bin, max_pimax_bin = compute_xi_sigmapi(
+        xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(
             gxs["x"].values, gxs["y"].values, gxs["z"].values,
             rxs["x"].values, rxs["y"].values, rxs["z"].values,
-            pi_rebin,
             data_weights=gxs["weight"].values,
             rand_weights=rxs["weight"].values,
             min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
@@ -932,13 +898,12 @@ def main():
             force_recompute=force_recompute_bin,
             dfil_bin_metadata=dfil_bin_metadata
         )
-        all_results.append( (xi_bin, rp_bins_bin, max_pimax_bin, pi_rebin,
-                             rf"$\xi(\sigma, \pi)$ {lab}", f"xi_sigma_pi_bin{i}.png") )
+        all_results.append( (xi_bin, s_bins_bin, mu_bins_bin,
+                             rf"$\xi(s, \mu)$ {lab}", f"xi_s_mu_bin{i}.png") )
 
         # Monopole for this bin
-        n_pi_bin = xi_bin.shape[1]
-        pi_edges_bin = np.arange(n_pi_bin + 1) * pi_rebin
-        s_centers_bin, xi0_bin = compute_monopole(xi_bin, rp_bins_bin, pi_edges_bin)
+        xi0_bin = compute_monopole_from_xi_s_mu(xi_bin, mu_bins_bin)
+        s_centers_bin = 0.5 * (s_bins_bin[:-1] + s_bins_bin[1:])
         monopoles_list.append((s_centers_bin, xi0_bin))
         labels_list.append(lab)
         monopole_file = os.path.join(monopoles_dir, f"monopole_bin{i}_{params_bin['dist_bin_mode']}.npz")
@@ -947,7 +912,7 @@ def main():
     # ------------------------------------------------------------------
     # Determine global color limits from all xi arrays
     # ------------------------------------------------------------------
-    all_xi_flat = np.concatenate([xi.ravel() for xi, _, _, _, _, _ in all_results])
+    all_xi_flat = np.concatenate([xi.ravel() for xi, _, _, _, _ in all_results])
     vmin_global = np.percentile(all_xi_flat, 1)
     vmax_global = np.percentile(all_xi_flat, 99)
     if vmin_global >= 0:
@@ -957,14 +922,14 @@ def main():
     print(f"Global color limits: vmin={vmin_global:.3f}, vmax={vmax_global:.3f}")
 
     # ------------------------------------------------------------------
-    # Second pass: plot all ξ(σ, π) with fixed color scale
+    # Second pass: plot all ξ(s, μ) with fixed color scale
     # ------------------------------------------------------------------
     print("\nSecond pass: plotting with fixed color scale...")
-    for xi, sigma_edges, max_pimax, pi_rebin_val, title, plotname in all_results:
-        plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin_val,
-                        title=title, output_folder=output_folder, plotname=plotname,
-                        min_sep=min_sep_2d,
-                        vmin_global=vmin_global, vmax_global=vmax_global)
+    for xi, s_edges, mu_edges, title, plotname in all_results:
+        plot_xi_s_mu(xi, s_edges, mu_edges,
+                     title=title, output_folder=output_folder, plotname=plotname,
+                     min_sep=min_sep_2d,
+                     vmin_global=vmin_global, vmax_global=vmax_global)
 
     # ------------------------------------------------------------------
     # Combined monopole plot
