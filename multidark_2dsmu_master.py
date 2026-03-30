@@ -21,13 +21,13 @@ import cartopy.crs as ccrs   # needed for lightcone skymap, safe to import alway
 # ================================
 # MODE SELECTION
 # ================================
-MODE = "lightcone"          # "lightcone" or "box"
+MODE = "box"          # "lightcone" or "box"
 test_dilute = .3
 # ================================
 # COMMON PARAMETERS
 # ================================
-force_recompute_full = False
-force_recompute_bin = False
+force_recompute_full = True
+force_recompute_bin = True
 
 # ---- 2D correlation function parameters (now s,mu) ------
 min_sep_2d = 1.0          # minimum s in Mpc/h
@@ -72,7 +72,7 @@ if MODE == "lightcone":
 
     # Output folders – add suffix to indicate RSD/real
     suffix = "_rsd" if include_rsd else "_real"
-    folderName = f'XISIGMAPI_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_nrand{nrand_mult}_RADECmethod{ran_radec_method}{suffix}'
+    folderName = f'XISMU_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_nrand{nrand_mult}_RADECmethod{ran_radec_method}{suffix}'
     output_folder = f"../plots/{folderName}/"
     paircounts_dir = "../data/pair_counts/"
     monopoles_dir = "../data/monopoles/lightcone"
@@ -87,7 +87,7 @@ else:  # MODE == "box"
     mag_max = -21.5
 
     # Output folders
-    folderName = f'XISIGMAPI_3Dbox_mag{mag_max:.1f}_nrand{nrand_mult}'
+    folderName = f'XISMU_3Dbox_mag{mag_max:.1f}_nrand{nrand_mult}'
     output_folder = f"../plots/{folderName}/"
     paircounts_dir = "../data/pair_counts/"
     monopoles_dir = "../data/monopoles/3dbox"
@@ -560,26 +560,45 @@ def compute_xi_s_mu(x_data, y_data, z_data,
 
 def plot_xi_s_mu(xi, s_edges, mu_edges,
                  title=None, output_folder=None, plotname="xi_s_mu.png",
-                 min_sep=0.0, vmin_global=None, vmax_global=None):
+                 min_sep=0.0, vmin_global=None, vmax_global=None,
+                 contour_levels=None, contour_colors='black', contour_linewidths=1,
+                 contour_kwargs=None):
     """
-    Plot ξ(s, μ) as a 2D colormesh.
+    Plot ξ(s, μ) with s on Y-axis, μ on X-axis (decreasing from 1 left to 0 right),
+    optionally overlaying contour lines.
+
+    Parameters
+    ----------
     xi : 2D array of shape (nbins_s, nbins_mu)
     s_edges : 1D array of length nbins_s+1
     mu_edges : 1D array of length nbins_mu+1
+    title : str, optional
+    output_folder : str, optional
+    plotname : str, default "xi_s_mu.png"
+    min_sep : float, default 0.0, minimum s shown
+    vmin_global, vmax_global : floats, optional
+        Global color limits (if None, use percentiles of xi)
+    contour_levels : list of float, optional
+        If provided, draw contours at these ξ values.
+    contour_colors : str or list, default 'white'
+    contour_linewidths : float or list, default 1
+    contour_kwargs : dict, optional
+        Additional keyword arguments passed to ax.contour (e.g., linestyles)
     """
-    # Create meshgrid from edges (for pcolormesh)
-    X, Y = np.meshgrid(s_edges, mu_edges)
-    C = xi.T  # shape (nbins_mu, nbins_s)
+    # Reverse mu_edges and xi along μ axis
+    mu_edges_rev = mu_edges[::-1]
+    xi_rev = xi[:, ::-1]  # shape (nbins_s, nbins_mu)
 
-    # Compute centers for axis labeling (optional)
-    s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
-    mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
+    # Meshgrid: X = μ (reversed edges), Y = s
+    X, Y = np.meshgrid(mu_edges_rev, s_edges)
 
-    # Set color scale
+    # Data C = xi_rev (no transpose needed: first dim = s, second = μ)
+    C = xi_rev
+
+    # Determine color scale
     linthresh = 0.001
     if vmin_global is not None and vmax_global is not None:
-        vmin = vmin_global
-        vmax = vmax_global
+        vmin, vmax = vmin_global, vmax_global
     else:
         vmin = np.percentile(xi, 1)
         vmax = np.percentile(xi, 99)
@@ -587,20 +606,38 @@ def plot_xi_s_mu(xi, s_edges, mu_edges,
             vmin = -vmax / 2
         if vmax <= 0:
             vmax = -vmin / 2
-
     norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=vmin, vmax=vmax)
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    # Use pcolormesh with edges and shading='flat'
+
+    # Colormesh
     im = ax.pcolormesh(X, Y, C, shading='flat', cmap='plasma', norm=norm)
-    ax.set_xlabel(r'$s$ [$h^{-1}$ Mpc]')
-    ax.set_ylabel(r'$\mu$')
+
+    # Contours if requested
+    if contour_levels is not None:
+        # Prepare contour kwargs
+        ckwargs = {'colors': contour_colors, 'linewidths': contour_linewidths}
+        if contour_kwargs is not None:
+            ckwargs.update(contour_kwargs)
+        # Plot contours; note: X and Y are edges, C is cell values at cell centers
+        # But pcolormesh with flat shading uses cell edges; contour expects data at vertices.
+        # For correct alignment, we need the centers. We can compute centers and use them.
+        s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
+        mu_centers_rev = 0.5 * (mu_edges_rev[:-1] + mu_edges_rev[1:])
+        Xc, Yc = np.meshgrid(mu_centers_rev, s_centers)
+        # Plot contours on the centers grid
+        ax.contour(Xc, Yc, C, levels=contour_levels, **ckwargs)
+
+    # Labels and title
+    ax.set_xlabel(r'$\mu$')
+    ax.set_ylabel(r'$s$ [$h^{-1}$ Mpc]')
     ax.set_title(title if title else r'$\xi(s, \mu)$')
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(r'$\xi(s,\mu)$')
 
-    ax.set_xlim(left=min_sep)
-    ax.set_ylim(bottom=0, top=1)
+    # Axis limits: s from min_sep to max(s_edges), μ from 1 to 0
+    ax.set_ylim(bottom=min_sep, top=s_edges[-1])
+    ax.set_xlim(right=0, left=1)
 
     if output_folder:
         os.makedirs(output_folder, exist_ok=True)
@@ -859,7 +896,9 @@ def main():
 
     xi_full, s_bins, mu_bins = compute_xi_s_mu(
         cat["x"].values, cat["y"].values, cat["z"].values,
-        random_full["x"].values, random_full["y"].values, random_full["z"].values,
+        random_full["x"].values if MODE=='lightcone' else None, 
+        random_full["y"].values if MODE=='lightcone' else None, 
+        random_full["z"].values if MODE=='lightcone' else None,
         data_weights=cat["weight"].values,
         rand_weights=random_full["weight"].values,
         min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
@@ -926,10 +965,15 @@ def main():
     # ------------------------------------------------------------------
     print("\nSecond pass: plotting with fixed color scale...")
     for xi, s_edges, mu_edges, title, plotname in all_results:
+        # Define contour levels (customize as needed)
+        contour_levels = [-0.1, -0.01, 0, 0.1, 1, 2]
+
+        # For each sample
         plot_xi_s_mu(xi, s_edges, mu_edges,
-                     title=title, output_folder=output_folder, plotname=plotname,
-                     min_sep=min_sep_2d,
-                     vmin_global=vmin_global, vmax_global=vmax_global)
+                    title=title, output_folder=output_folder, plotname=plotname,
+                    min_sep=min_sep_2d,
+                    vmin_global=vmin_global, vmax_global=vmax_global,
+                    contour_levels=contour_levels, contour_colors='black')
 
     # ------------------------------------------------------------------
     # Combined monopole plot
