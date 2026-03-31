@@ -18,13 +18,14 @@ from matplotlib.colors import SymLogNorm
 L = 1000.0               # box size in Mpc/h
 mag_max = -21.2          # magnitude cut
 test_dilute = 1.0        # fraction of data to use (for testing)
-force_recompute_full = True
-force_recompute_bin = True
+force_recompute_full = False
+force_recompute_bin = False
 
 # ---- 2D correlation function parameters (s, μ) ------
 min_sep_2d = 1.0          # minimum s in Mpc/h
 max_sep_2d = 150.0
 bin_size_2d = 2.0
+pi_rebin = bin_size_2d  # for xi(σ, π) rebinning (same as s bin size)
 # Number of μ bins will be set equal to number of s bins (no rebinning)
 
 # ------ dist_fil binning ------
@@ -467,6 +468,144 @@ def split_by_dist_fil_bins(cat):
         labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
     return bins, labels, edges
 
+# ==========================
+# Xi(sigma, pi) functions
+# ==========================
+from scipy.interpolate import RegularGridInterpolator
+
+def xi_s_mu_to_xi_sigma_pi(xi_s_mu, s_edges, mu_edges, sigma_edges, pi_rebin):
+    """
+    Convert ξ(s, μ) to ξ(σ, π) via interpolation.
+
+    Parameters:
+    -----------
+    xi_s_mu : 2D array, shape (len(s_centers), len(mu_centers))
+        Correlation function on the (s, μ) grid.
+    s_edges : 1D array
+        Bin edges for s.
+    mu_edges : 1D array
+        Bin edges for μ.
+    sigma_edges : 1D array
+        Bin edges for σ (usually identical to s_edges).
+    pi_rebin : float
+        Bin width for π (used to define π bins).
+
+    Returns:
+    --------
+    xi_sigma_pi : 2D array, shape (len(sigma_centers), len(pi_centers))
+        Correlation function on the (σ, π) grid.
+    sigma_edges : 1D array
+        Input sigma_edges (unchanged).
+    max_pimax : float
+        Maximum π value covered by the π bins.
+    """
+    s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
+    mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
+
+    # Build interpolator
+    interp = RegularGridInterpolator(
+        (s_centers, mu_centers), xi_s_mu,
+        bounds_error=False, fill_value=0.0
+    )
+
+    # σ grid
+    sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
+    max_pimax = sigma_edges[-1]               # largest π we consider
+    pi_edges = np.arange(0, max_pimax + pi_rebin, pi_rebin)
+    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
+
+    # Create meshgrid of (σ, π) points
+    S, P = np.meshgrid(sigma_centers, pi_centers, indexing='ij')
+    # Convert to (s, μ)
+    s = np.sqrt(S**2 + P**2)
+    mu = P / s
+    mu[~np.isfinite(mu)] = 0.0
+
+    points = np.stack([s.ravel(), mu.ravel()], axis=-1)
+    xi_interp = interp(points).reshape(s.shape)
+
+    return xi_interp, sigma_edges, max_pimax
+
+def plot_xi_sigma_pi_from_xi_s_mu(xi_s_mu, s_edges, mu_edges, sigma_edges, pi_rebin,
+                                  title=None, output_folder=None, plotname="xi_sigma_pi.png",
+                                  min_sep=0.0, vmin_global=None, vmax_global=None):
+    """
+    Convert ξ(s, μ) to ξ(σ, π) and plot it with contours (if valid levels).
+    """
+    # Convert first
+    xi, sigma_edges, max_pimax = xi_s_mu_to_xi_sigma_pi(
+        xi_s_mu, s_edges, mu_edges, sigma_edges, pi_rebin
+    )
+
+    # Build π edges
+    pi_edges = np.arange(0, max_pimax + pi_rebin, pi_rebin)
+
+    # Create meshgrid for plotting
+    X, Y = np.meshgrid(sigma_edges, pi_edges)
+    C = xi.T   # transpose because xi is (σ, π) but we want (π, σ) for meshgrid
+
+    # Determine color scale
+    linthresh = 0.001
+    if vmin_global is not None and vmax_global is not None:
+        vmin, vmax = vmin_global, vmax_global
+    else:
+        vmin = np.percentile(xi, 1)
+        vmax = np.percentile(xi, 99)
+        if vmin >= 0:
+            vmin = -vmax / 2
+        if vmax <= 0:
+            vmax = -vmin / 2
+
+    norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=vmin, vmax=vmax)
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.pcolormesh(X, Y, C, shading='flat', cmap='plasma', norm=norm)
+    ax.set_xlabel(r'$\sigma$ [$h^{-1}$ Mpc]')
+    ax.set_ylabel(r'$\pi$ [$h^{-1}$ Mpc]')
+    ax.set_title(title if title else r'$\xi(\sigma, \pi)$')
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(r'$\xi(\sigma,\pi)$')
+
+    # Add contours only if we have valid data in the region
+    sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
+    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
+    Xc, Yc = np.meshgrid(sigma_centers, pi_centers)
+
+    # Region of interest (e.g., 50–150 Mpc/h in both axes)
+    mask_region = (Xc >= 50) & (Xc <= 150) & (Yc >= 50) & (Yc <= 150)
+    values_region = C[mask_region]
+    if len(values_region) > 0:
+        levels = np.percentile(values_region, [50, 70, 90])
+        # Ensure levels are strictly increasing
+        if len(np.unique(levels)) == len(levels) and np.all(np.diff(levels) > 0):
+            ax.contour(Xc, Yc, C, levels=levels, colors='k', linewidths=1.5)
+        else:
+            print(f"Warning: Contour levels not strictly increasing for {plotname}. Skipping contour.")
+    else:
+        print(f"Warning: No data in region for {plotname}. Skipping contour.")
+
+    # Plot BAO circle
+    theta = np.linspace(0, np.pi/2, 100)  # only first quadrant because σ,π ≥ 0
+    sigma_circle = 105 * np.cos(theta)
+    pi_circle = 105 * np.sin(theta)
+    ax.plot(sigma_circle, pi_circle, 'w--', linewidth=2, alpha=.8, \
+            label=r'$s = {}$ Mpc/h'.format(int(105)))
+    ax.legend(loc='upper right')
+
+    ax.set_xlim(left=min_sep)
+    ax.set_ylim(bottom=min_sep)
+
+    if output_folder:
+        os.makedirs(output_folder, exist_ok=True)
+        outpath = os.path.join(output_folder, plotname)
+        fig.savefig(outpath, dpi=200, bbox_inches='tight')
+        print(f"Saved ξ(σ, π) plot to {outpath}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
+
 # ================================
 # MAIN PROCEDURE
 # ================================
@@ -550,6 +689,18 @@ def main():
     xi_s_file = os.path.join(paircounts_dir, f"xi_s_full_{params_full['dist_bin_mode']}.npz")
     np.savez(xi_s_file, s=s_centers_xi_s, xi_s=xi_s_full)
 
+    # Plot ξ(σ, π) for full sample
+    sigma_bins = np.linspace(min_sep_2d, max_sep_2d, int((max_sep_2d - min_sep_2d) / bin_size_2d) + 1)
+    plot_xi_sigma_pi_from_xi_s_mu(
+        xi_full, s_bins, mu_bins, sigma_bins, pi_rebin,
+        title=rf"$\xi(\sigma,\pi)$ Full Sample",
+        output_folder=output_folder,
+        plotname="xi_sigma_pi_full.png",
+        min_sep=min_sep_2d,
+        vmin_global=None,  # auto‑scale; or you can compute global limits as before
+        vmax_global=None
+    )
+
     # ------------------------
     # Subsamples
     # ------------------------
@@ -595,7 +746,16 @@ def main():
         xi_s_file = os.path.join(paircounts_dir, f"xi_s_bin{i}_{params_bin['dist_bin_mode']}.npz")
         np.savez(xi_s_file, s=s_centers_xi_s_bin, xi_s=xi_s_bin, **dfil_bin_metadata)
 
-
+        # Plot ξ(σ, π) for this bin
+        plot_xi_sigma_pi_from_xi_s_mu(
+            xi_bin, s_bins, mu_bins, sigma_bins, pi_rebin,
+            title=rf"$\xi(\sigma,\pi)$ Bin ({lab})",
+            output_folder=output_folder,
+            plotname=f"xi_sigma_pi_bin{i}.png",
+            min_sep=min_sep_2d,
+            vmin_global=None,  # auto‑scale; or you can compute global limits as before
+            vmax_global=None
+        )
     # ------------------------------------------------------------------
     # Determine global color limits from all xi arrays
     # ------------------------------------------------------------------
