@@ -1,6 +1,7 @@
 """
 BOX analysis
 - xi(s), xi(mu, s) and xi_0(s) w/analytical randoms
+- option to convert to xi(sigma, pi) via interpolation for plotting
 
 """
 
@@ -29,13 +30,14 @@ pi_rebin = bin_size_2d  # for xi(σ, π) rebinning (same as s bin size)
 # Number of μ bins will be set equal to number of s bins (no rebinning)
 
 # ------ dist_fil binning ------
-dist_bin_mode = "percentile_intervals"  # options: "custom_intervals", "percentile_intervals", "percentile", "equal_width", "fixed"
+dist_bin_mode = "custom_intervals"  # options: "custom_intervals", "percentile_intervals", "percentile", "equal_width", "fixed"
 dist_bin_percentile_intervals = [   # used for "percentile_intervals"
     (0, 30),      # a–bth percentile
     (50, 100)      # c–dth percentile
 ]
 nbins_dist = 4               # used only for percentile / equal_width
 dist_bin_edges = [0, 5, 10, 15, 100]  # used only for "fixed"
+dist_bin_custom_intervals = [(0, 4), (8, 100)] # used only for "custom_intervals"
 
 # Output folders
 folderName = f'XISMU_box_mag{mag_max:.1f}'
@@ -79,11 +81,11 @@ def get_paircounts_filename(bin_name, params):
     if 'min_sep_2d' in params and 'max_sep_2d' in params:
         parts.append(f"sep={params['min_sep_2d']}-{params['max_sep_2d']}")
     if 'bin_size_2d' in params:
-        parts.append(f"bin={params['bin_size_2d']}")
-    parts.append(f"bin={bin_name}")
+        parts.append(f"binsep={params['bin_size_2d']}")
+    parts.append(f"sample={bin_name}")
     if 'dist_bin_mode' in params:
         parts.append(f"distbinmode={params['dist_bin_mode']}")
-    fname = "_".join(parts).replace('.', 'p')
+    fname = "_".join(parts)#.replace('.', 'p')
     return os.path.join(paircounts_dir, fname + ".npz")
 
 # ================================
@@ -136,9 +138,8 @@ def plot_bin_data(gxs, label, plotname):
 
     ax_map.set_xlabel("x [Mpc/h]")
     ax_map.set_ylabel("y [Mpc/h]")
-    ax_map.set_title(label)
+    ax_map.set_title(label+f" (z < 100 Mpc/h, N={len(gxs_plot)})")
     ax_map.set_aspect('equal')
-    ax_map.set_title('z < 100 Mpc/h')  # this overwrites previous title – you may want to combine or remove one
 
     # Plot distfil histogram
     ax_hist_dist = axes[1]
@@ -381,7 +382,8 @@ def plot_xi_s_combined(xi_s_list, labels, output_folder=None, filename='xi_s_com
 # ================================
 def compute_monopole_from_xi_s_mu(xi, mu_edges):
     mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
-    xi0 = np.trapz(xi, x=mu_centers, axis=1)
+    dmu = mu_centers[1] - mu_centers[0] if len(mu_centers) > 1 else 1.0
+    xi0 = np.trapz(xi, dx=dmu, axis=1)  # integrate along μ dimension
     return xi0
 
 def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename='xi0_combined.png'):
@@ -431,7 +433,15 @@ def split_by_dist_fil_bins(cat):
     values = cat["dist_fil"].values
 
     if dist_bin_mode == "custom_intervals":
-        raise NotImplementedError("custom_intervals not implemented")
+        intervals = dist_bin_custom_intervals
+        bins = []
+        labels = []
+        for lo, hi in intervals:
+            mask = (values >= lo) & (values <= hi)
+            subset = cat.loc[mask].copy()
+            bins.append(subset)
+            labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
+        return bins, labels, None
     elif dist_bin_mode == "percentile_intervals":
         if not hasattr(dist_bin_percentile_intervals, '__iter__'):
             raise ValueError("dist_bin_percentile_intervals must be a list of (low, high) tuples")
@@ -625,7 +635,17 @@ def main():
     print(f"Split into {len(bins)} bins:")
     print("\n".join([f"  Bin {i}: {len(b)} galaxies, {label}" for i, (b, label) in enumerate(zip(bins, labels))]))
     print(f"Distance bin mode: {dist_bin_mode}")
-    print(f"Mode parameters: {dist_bin_percentile_intervals if dist_bin_mode == 'percentile_intervals' else (nbins_dist if dist_bin_mode in ['percentile', 'equal_width'] else dist_bin_edges if dist_bin_mode == 'fixed' else 'N/A')}")
+    print(f"Distance bin mode: {dist_bin_mode}")
+    if dist_bin_mode == "custom_intervals":
+        print(f"Mode parameters: {dist_bin_custom_intervals}")
+    elif dist_bin_mode == "percentile_intervals":
+        print(f"Mode parameters: {dist_bin_percentile_intervals}")
+    elif dist_bin_mode in ["percentile", "equal_width"]:
+        print(f"Mode parameters: nbins_dist = {nbins_dist}")
+    elif dist_bin_mode == "fixed":
+        print(f"Mode parameters: dist_bin_edges = {dist_bin_edges}")
+    else:
+        print("Mode parameters: N/A")
 
     # ------------------------------------------------------------------
     # Diagnostic plots
@@ -633,7 +653,10 @@ def main():
     plot_bin_data(cat, label="Full Sample",
                               plotname=f"../plots/{folderName}/bin_full_data_randoms.png")
     for i, (gxs, lab) in enumerate(zip(bins, labels)):
-        plot_bin_data(gxs, label=lab,
+        dfil_min = gxs["dist_fil"].min()
+        dfil_max = gxs["dist_fil"].max()
+        actual_label = f"${dfil_min:.1f} < r_{{fil}} \\leq {dfil_max:.1f}$"   # <-- new label
+        plot_bin_data(gxs, label=actual_label,
                                   plotname=f"../plots/{folderName}/bin_{i}_data_randoms.png")
 
 
@@ -705,15 +728,22 @@ def main():
     # Subsamples
     # ------------------------
     for i, (gxs, lab) in enumerate(zip(bins, labels)):
+        dfil_min = gxs["dist_fil"].min()
+        dfil_max = gxs["dist_fil"].max()
+        actual_label = f"${dfil_min:.1f} < r_{{fil}} \\leq {dfil_max:.1f}$"   # <-- new label
+        dfil_range_str = f"dfil{dfil_min:.1f}_{dfil_max:.1f}"#.replace('.', 'p')
+        bin_desc = f"{dfil_range_str}"
+
         params_bin = base_params.copy()
         params_bin['dist_bin_mode'] = dist_bin_mode
-        paircounts_file_bin = get_paircounts_filename(f"bin{i}", params_bin)
 
         dfil_bin_metadata = {
-            'dfil_min': gxs["dist_fil"].min(),
-            'dfil_max': gxs["dist_fil"].max(),
+            'dfil_min': dfil_min,
+            'dfil_max': dfil_max,
         }
 
+        # ---- 2D correlation function ----
+        paircounts_file_bin = get_paircounts_filename(bin_desc, params_bin)
         xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(
             gxs["x"].values, gxs["y"].values, gxs["z"].values,
             min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
@@ -722,18 +752,19 @@ def main():
             dfil_bin_metadata=dfil_bin_metadata
         )
         all_results.append( (xi_bin, s_bins_bin, mu_bins_bin,
-                             rf"$\xi(s, \mu)$ {lab}", f"xi_s_mu_bin{i}.png") )
+                            rf"$\xi(s, \mu)$ {actual_label}",   # <-- use actual_label
+                            f"xi_s_mu_{bin_desc}.png") )
 
-        # Monopole for this bin
+        # ---- Monopole ----
         xi0_bin = compute_monopole_from_xi_s_mu(xi_bin, mu_bins_bin)
         s_centers_bin = 0.5 * (s_bins_bin[:-1] + s_bins_bin[1:])
         monopoles_list.append((s_centers_bin, xi0_bin))
-        labels_list.append(lab)
-        monopole_file = os.path.join(monopoles_dir, f"monopole_bin{i}_{params_bin['dist_bin_mode']}.npz")
+        labels_list.append(actual_label)   # <-- use actual_label for combined plots
+        monopole_file = os.path.join(monopoles_dir, f"monopole_{bin_desc}_{params_bin['dist_bin_mode']}.npz")
         np.savez(monopole_file, s=s_centers_bin, xi0=xi0_bin, **dfil_bin_metadata)
 
-        # Xi(s) for this bin
-        paircounts_file_bin_xi_s = get_paircounts_filename(f"bin{i}_xi_s", params_bin)
+        # ---- 1D correlation function (xi(s)) ----
+        paircounts_file_bin_xi_s = get_paircounts_filename(f"{bin_desc}_xi_s", params_bin)
         xi_s_bin, s_bins_xi_s_bin = compute_xi_s(
             gxs["x"].values, gxs["y"].values, gxs["z"].values,
             min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
@@ -743,18 +774,17 @@ def main():
         )
         s_centers_xi_s_bin = 0.5 * (s_bins_xi_s_bin[:-1] + s_bins_xi_s_bin[1:])
         xi_s_list.append((s_centers_xi_s_bin, xi_s_bin))
-        xi_s_file = os.path.join(paircounts_dir, f"xi_s_bin{i}_{params_bin['dist_bin_mode']}.npz")
+        xi_s_file = os.path.join(paircounts_dir, f"xi_s_{bin_desc}_{params_bin['dist_bin_mode']}.npz")
         np.savez(xi_s_file, s=s_centers_xi_s_bin, xi_s=xi_s_bin, **dfil_bin_metadata)
 
-        # Plot ξ(σ, π) for this bin
+        # ---- ξ(σ,π) plot ----
         plot_xi_sigma_pi_from_xi_s_mu(
-            xi_bin, s_bins, mu_bins, sigma_bins, pi_rebin,
-            title=rf"$\xi(\sigma,\pi)$ Bin ({lab})",
+            xi_bin, s_bins_bin, mu_bins_bin, sigma_bins, pi_rebin,
+            title=rf"$\xi(\sigma,\pi)$ {actual_label}",   # <-- use actual_label
             output_folder=output_folder,
-            plotname=f"xi_sigma_pi_bin{i}.png",
+            plotname=f"xi_sigma_pi_{bin_desc}.png",
             min_sep=min_sep_2d,
-            vmin_global=None,  # auto‑scale; or you can compute global limits as before
-            vmax_global=None
+            vmin_global=None, vmax_global=None
         )
     # ------------------------------------------------------------------
     # Determine global color limits from all xi arrays
