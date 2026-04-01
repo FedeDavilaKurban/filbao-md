@@ -94,24 +94,59 @@ def plot_magnitude_hist(cat, mag_max, output_folder, mag_col='mag_abs_r'):
     fig.savefig(os.path.join(output_folder, "magnitude_hist.png"), dpi=100, bbox_inches="tight")
     plt.close(fig)
 
-def plot_bin_data(gxs, label, output_folder, filename=None):
-    """Plot 2D spatial slice and distance histogram."""
-    fig, axes = plt.subplots(2, 1, figsize=(7, 10))
+def plot_bin_data(gxs, label, output_folder, filename=None, subsample_cols=None):
+    """
+    Plot 2D spatial slice and histograms.
+    
+    Parameters
+    ----------
+    gxs : DataFrame
+        Galaxy sample.
+    label : str
+        Label for title.
+    output_folder : str
+        Folder to save the plot.
+    filename : str, optional
+        Output filename.
+    subsample_cols : list[str], optional
+        Columns used for subsampling (1 or 2). Determines histogram layout.
+    """
+    if subsample_cols is None:
+        subsample_cols = ["dist_fil"]  # default to single-variable
+
+    n_hist = len(subsample_cols)
+    fig, axes = plt.subplots(1 + n_hist, 1, figsize=(7, 5*(1+n_hist)))
+    
+    # ensure axes is always a list
+    #if n_hist == 1:
+    #    axes = [axes]
+    #axes0 = axes[0]
+    axes0 = axes if isinstance(axes, plt.Axes) else axes[0]
+
+    # 2D spatial plot
     gxs_plot = gxs[gxs["z"] < 100.]
-    h, xedges, yedges, im = axes[0].hist2d(
+    h, xedges, yedges, im = axes0.hist2d(
         gxs_plot["x"], gxs_plot["y"],
         bins=100, cmap="Blues",
         norm=SymLogNorm(linthresh=1, vmin=1, vmax=gxs_plot.shape[0]/500)
     )
-    fig.colorbar(im, ax=axes[0], label="N. of galaxies")
-    axes[0].set_xlabel("x [Mpc/h]")
-    axes[0].set_ylabel("y [Mpc/h]")
-    axes[0].set_title(label + f" (z < 100 Mpc/h, N={len(gxs_plot)})")
-    axes[0].set_aspect('equal')
+    fig.colorbar(im, ax=axes0, label="N. of galaxies")
+    axes0.set_xlabel("x [Mpc/h]")
+    axes0.set_ylabel("y [Mpc/h]")
+    axes0.set_title(label + f" (z < 100 Mpc/h, N={len(gxs_plot)})")
+    axes0.set_aspect('equal')
 
-    axes[1].hist(gxs["dist_fil"], bins=40, density=True, color="C03", alpha=0.9)
-    axes[1].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
-    axes[1].set_ylabel("PDF")
+    # 1D histograms for subsample variables
+    for i, col in enumerate(subsample_cols):
+        axes[i+1].hist(gxs[col], bins=40, density=True, color="C03", alpha=0.9)
+        if col == "dist_fil":
+            axes[i+1].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
+        elif col in ["rho_3", "log_rho_3"]:
+            axes[i+1].set_xlabel(r"$\rho_3$ [h$^{-1}$ Mpc]" if col=="rho_3" else r"$\log_{10} \rho_3$")
+        else:
+            axes[i+1].set_xlabel(col)
+        axes[i+1].set_ylabel("PDF")
+
     plt.tight_layout()
     if filename is None:
         filename = f"bin_{label.replace('$','').replace(' ','_')}.png"
@@ -119,60 +154,20 @@ def plot_bin_data(gxs, label, output_folder, filename=None):
     fig.savefig(os.path.join(output_folder, filename), dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-
 from heapq import heappush, heappushpop
+from scipy.spatial import cKDTree
 
 def compute_knn_distance(points, k=3, boxsize=None):
-    """
-    Compute distance to the k-th nearest neighbor for each point.
-    If boxsize is given, uses periodic boundary conditions via 27-image queries.
-    """
-    if boxsize is None:
-        tree = cKDTree(points)
-        dists, _ = tree.query(points, k=k+1)
-        return dists[:, k]
-
-    tree = cKDTree(points)
-    # Generate the 27 periodic image shifts (including zero shift)
-    shifts = np.array([(dx, dy, dz)
-                       for dx in (-1, 0, 1)
-                       for dy in (-1, 0, 1)
-                       for dz in (-1, 0, 1)]) * boxsize
-
-    # For each point, maintain a max-heap of the k smallest distances
-    # (store negative to simulate a max‑heap)
-    heaps = [[] for _ in range(len(points))]
-
-    for shift in shifts:
-        # Query all points shifted by this offset
-        q_points = points + shift
-        dists, indices = tree.query(q_points, k=k+1)
-        for i in range(len(points)):
-            d_i = dists[i]
-            idx_i = indices[i]
-            for d, j in zip(d_i, idx_i):
-                if j == i or d == 0:   # skip self (distance zero)
-                    continue
-                # Insert into max-heap (store -d so smallest distances become largest negatives)
-                if len(heaps[i]) < k:
-                    heappush(heaps[i], -d)
-                elif -heaps[i][0] > d:
-                    heappushpop(heaps[i], -d)
-
-    # Extract the k-th smallest distance from each heap
-    knn_dists = []
-    for i, heap in enumerate(heaps):
-        if len(heap) < k:
-            knn_dists.append(np.inf)
-        else:
-            # The largest negative corresponds to the k-th smallest distance
-            knn_dists.append(-heap[0])
-    return np.array(knn_dists)
+    if boxsize is not None:
+        points = points % boxsize
+    tree = cKDTree(points, boxsize=boxsize)
+    dists, _ = tree.query(points, k=k+1)
+    return dists[:, k]
     
 # At the top of data_loader.py, after imports
 COL_TO_LATEX = {
     'dist_fil': r'd_{\mathrm{fil}}',
-    'Sigma_3': r'\Sigma_3',
+    'log_rho_3': r'\mathrm{log_{10}}\rho_3',
 }
 
 def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=None,
