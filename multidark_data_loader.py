@@ -133,7 +133,7 @@ def plot_bin_data(gxs, label, output_folder, filename=None, subsample_cols=None)
     fig.colorbar(im, ax=axes0, label="N. of galaxies")
     axes0.set_xlabel("x [Mpc/h]")
     axes0.set_ylabel("y [Mpc/h]")
-    axes0.set_title(label + f" (z < 100 Mpc/h, N={len(gxs_plot)})")
+    axes0.set_title(label + f" (z < 100 Mpc/h, N={len(gxs_plot)} of {len(gxs)})")
     axes0.set_aspect('equal')
 
     # 1D histograms for subsample variables
