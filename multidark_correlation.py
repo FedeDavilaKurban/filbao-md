@@ -152,5 +152,5 @@ def compute_monopole_from_xi_s_mu(xi, mu_edges):
     """Integrate ξ(s, μ) over μ to get monopole ξ₀(s)."""
     mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
     dmu = mu_centers[1] - mu_centers[0] if len(mu_centers) > 1 else 1.0
-    xi0 = np.trapz(xi, dx=dmu, axis=1)
+    xi0 = np.trapezoid(xi, dx=dmu, axis=1)
     return xi0
