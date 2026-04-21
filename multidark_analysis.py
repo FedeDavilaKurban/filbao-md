@@ -31,14 +31,14 @@ split_vars = [
     {
         'col': 'dist_fil',
         'mode': 'custom_intervals',
-        'custom_intervals': [(0, 3), (3, 100)]
+        'custom_intervals': [(0, 3), (5, 10), (10, 100)]
     },
     # Uncomment to also split by rho_3:
-    {
-        'col': 'log_rho_3',
-        'mode': 'percentile_intervals',
-        'percentile_intervals': [(0, 84), (84, 100)]
-    }
+    # {
+    #     'col': 'log_rho_3',
+    #     'mode': 'percentile_intervals',
+    #     'percentile_intervals': [(0, 84), (84, 100)]
+    # }
 ]
 
 # Output folders
