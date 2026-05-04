@@ -39,10 +39,20 @@ def get_save_filename(bin_desc, params, out_folder, filetype='monopole'):
 
 def compute_xi_s_mu(x, y, z, min_sep, max_sep, bin_size,
                     boxsize=1000.0, paircounts_filename=None, force_recompute=False,
-                    dfil_bin_metadata=None, nthreads=None):
+                    dfil_bin_metadata=None, nthreads=None, volume=None):
     """
     Compute ξ(s, μ) using analytic random pairs.
-    Returns (xi, s_bins, mu_bins).
+
+    Parameters
+    ----------
+    x, y, z : array_like
+        Coordinates of tracers (in Mpc/h).
+    ...
+    volume : float, optional
+        Effective survey volume for the analytic random pairs.
+        If None, the full cubic volume boxsize**3 is used.
+        For jackknife subsets this should be the volume of the remaining
+        region (boxsize**3 minus the removed sub‑volume).
     """
     if nthreads is None:
         nthreads = min(multiprocessing.cpu_count() - 4, 16)
@@ -76,7 +86,7 @@ def compute_xi_s_mu(x, y, z, min_sep, max_sep, bin_size,
 
     # Analytic RR
     N = len(x)
-    V = boxsize**3
+    V = volume if volume is not None else boxsize**3   # <-- use effective volume
     RR = np.zeros((nbins_s, nbins_mu))
     for i in range(nbins_s):
         s_lo, s_hi = s_bins[i], s_bins[i+1]
@@ -91,16 +101,22 @@ def compute_xi_s_mu(x, y, z, min_sep, max_sep, bin_size,
         xi = H_dd / RR - 1.0
         xi[RR == 0] = np.nan
 
-    print(f"DD pairs: {np.sum(H_dd):.3e}, RR pairs: {np.sum(RR):.3e}, DD/RR: {np.sum(H_dd)/np.sum(RR):.6f}")
+    #print(f"DD pairs: {np.sum(H_dd):.3e}, RR pairs: {np.sum(RR):.3e}, DD/RR: {np.sum(H_dd)/np.sum(RR):.6f}")
     return xi, s_bins, mu_bins
 
 def compute_xi_s(x, y, z, min_sep, max_sep, bin_size,
                  boxsize=1000.0, paircounts_filename=None,
                  force_recompute=False, dfil_bin_metadata=None,
-                 nthreads=None):
+                 nthreads=None, volume=None):
     """
     Compute ξ(s) independently from scratch, using analytic randoms.
     Saves the result to paircounts_filename if provided.
+
+    Parameters
+    ----------
+    ...
+    volume : float, optional
+        Effective survey volume. If None, uses boxsize**3.
     """
     if nthreads is None:
         nthreads = min(multiprocessing.cpu_count() - 4, 16)
@@ -126,7 +142,7 @@ def compute_xi_s(x, y, z, min_sep, max_sep, bin_size,
 
     # Analytic RR counts
     N = len(x)
-    V = boxsize**3
+    V = volume if volume is not None else boxsize**3
     smin = s_bins[:-1]
     smax = s_bins[1:]
     shell_vol = (4.0/3.0) * np.pi * (smax**3 - smin**3)
@@ -154,3 +170,79 @@ def compute_monopole_from_xi_s_mu(xi, mu_edges):
     dmu = mu_centers[1] - mu_centers[0] if len(mu_centers) > 1 else 1.0
     xi0 = np.trapezoid(xi, dx=dmu, axis=1)
     return xi0
+
+
+def compute_jackknife_monopole_covariance(
+    x, y, z,
+    min_sep, max_sep, bin_size,
+    boxsize=1000.0,
+    n_sub_per_side=5,
+    nthreads=None,
+):
+    """
+    Compute the jackknife covariance matrix of the monopole ξ₀(s)
+    using spatial sub‑volumes of a periodic simulation box.
+
+    Returns
+    -------
+    s_centres : 1D array
+        Central separations of the monopole bins.
+    xi0_full : 1D array
+        Monopole of the full sample (the unbiased estimate).
+    cov : 2D array (n_bins × n_bins)
+        Jackknife covariance matrix of xi0_full.
+    """
+    if nthreads is None:
+        nthreads = min(multiprocessing.cpu_count() - 4, 16)
+
+    # 1. Full sample monopole (use full volume)
+    xi_full, s_bins, mu_bins = compute_xi_s_mu(
+        x, y, z,
+        min_sep, max_sep, bin_size,
+        boxsize=boxsize, nthreads=nthreads,
+        volume=boxsize**3
+    )
+    xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins)
+    s_centres = 0.5 * (s_bins[:-1] + s_bins[1:])
+    n_bins = len(s_centres)
+
+    # 2. Assign particles to sub‑volumes
+    sub_edges = np.linspace(0, boxsize, n_sub_per_side + 1)
+    i_idx = np.clip(np.searchsorted(sub_edges, x, side='right') - 1, 0, n_sub_per_side - 1)
+    j_idx = np.clip(np.searchsorted(sub_edges, y, side='right') - 1, 0, n_sub_per_side - 1)
+    k_idx = np.clip(np.searchsorted(sub_edges, z, side='right') - 1, 0, n_sub_per_side - 1)
+    particle_sub = i_idx * n_sub_per_side**2 + j_idx * n_sub_per_side + k_idx
+
+    n_sub_total = n_sub_per_side**3
+    sub_vol = (boxsize / n_sub_per_side)**3
+    volume_rem = boxsize**3 - sub_vol
+
+    # 3. Compute leave‑one‑out monopoles
+    xi_sub_all = np.empty((n_sub_total, n_bins))
+    for sub_id in range(n_sub_total):
+        mask = (particle_sub != sub_id)
+        if np.sum(mask) < 10:
+            print(f"Warning: sub‑volume {sub_id} contains almost all particles; using full sample as fallback")
+            xi_sub_all[sub_id] = xi0_full
+            continue
+
+        print(f"Processing sub‑volume {sub_id+1}/{n_sub_total}")
+
+        x_sub, y_sub, z_sub = x[mask], y[mask], z[mask]
+        xi_sub, _, mu_bins_sub = compute_xi_s_mu(
+            x_sub, y_sub, z_sub,
+            min_sep, max_sep, bin_size,
+            boxsize=boxsize, nthreads=nthreads,
+            volume=volume_rem,             # corrected volume
+            force_recompute=True,
+            paircounts_filename=None
+        )
+        xi_sub_all[sub_id] = compute_monopole_from_xi_s_mu(xi_sub, mu_bins_sub)
+
+    # 4. Jackknife covariance (delete‑one formula)
+    xi_bar = np.mean(xi_sub_all, axis=0)
+    diff = xi_sub_all - xi_bar   # (n_sub, n_bins)
+    # Standard jackknife covariance: (N-1)/N * sum (T_i - 𝔼[T])²
+    cov = (n_sub_total - 1) / n_sub_total * np.einsum('ij,ik->jk', diff, diff)
+
+    return s_centres, xi0_full, cov

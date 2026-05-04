@@ -74,13 +74,24 @@ def plot_xi_s_mu(xi, s_edges, mu_edges, title=None, output_folder=None, plotname
         plt.show()
     plt.close(fig)
 
-def plot_xi_s_combined(xi_s_list, labels, output_folder=None, filename='xi_s_combined.png'):
-    """Plot combined ξ(s) curves."""
+def plot_xi_s_combined(xi_s_list, labels, output_folder=None, errors=None, filename='xi_s_combined.png'):
+    """
+    Plot combined ξ(s) curves.
+    If `errors` is provided (same length as list), error bars are drawn.
+    """
     fig, ax = plt.subplots(figsize=(8,6))
     colors = plt.cm.tab10.colors
     for i, ((s_centers, xi_s), label) in enumerate(zip(xi_s_list, labels)):
-        ax.plot(s_centers, xi_s * s_centers**2, marker='o', linestyle='-',
-                color=colors[i % len(colors)], label=label)
+        err = errors[i] if errors is not None else None
+        color = colors[i % len(colors)]
+        if err is not None:
+            ax.fill_between(s_centers, (xi_s - err) * s_centers**2, (xi_s + err) * s_centers**2,
+                            color=color, alpha=0.3)
+            ax.plot(s_centers, xi_s * s_centers**2, marker='o', linestyle='-', color=color, label=label)
+        else:
+            ax.plot(s_centers, xi_s * s_centers**2,
+                    marker='o', linestyle='-', color=color, label=label)
+
     ax.axhline(0, color='gray', linestyle='-', linewidth=1)
     ax.axvline(105, color='k', linestyle=':', label='BAO scale')
     ax.set_xlabel(r'$s\,[h^{-1}\mathrm{Mpc}]$')
@@ -95,13 +106,23 @@ def plot_xi_s_combined(xi_s_list, labels, output_folder=None, filename='xi_s_com
         plt.show()
     plt.close(fig)
 
-def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename='xi0_combined.png'):
-    """Plot combined monopoles ξ₀(s)."""
+def plot_monopoles_combined(monopoles_list, labels, output_folder=None, errors=None, filename='xi0_combined.png'):
+    """
+    Plot combined monopoles ξ₀(s) with optional error bars.
+    """
     fig, ax = plt.subplots(figsize=(8,6))
     colors = plt.cm.tab10.colors
-    for i, ((s_centers, xi0), label) in enumerate(zip(monopoles_list, labels)):
-        ax.plot(s_centers, xi0 * s_centers**2, marker='o', linestyle='-',
-                color=colors[i % len(colors)], label=label)
+    for i, ((s, xi), lab) in enumerate(zip(monopoles_list, labels)):
+        err = errors[i] if errors is not None else None
+        color = colors[i % len(colors)]
+        if err is not None:
+            ax.fill_between(s, (xi - err) * s**2, (xi + err) * s**2,
+                            color=color, alpha=0.3)
+            ax.plot(s, xi * s**2, marker='o', linestyle='-', color=color, label=lab)
+        else:
+            ax.plot(s, s**2 * xi, marker='o', linestyle='-',
+                    color=color, label=lab)
+
     ax.axhline(0, color='gray', linestyle='-', linewidth=1)
     ax.axvline(105, color='k', linestyle=':', label='BAO scale')
     ax.set_xlabel(r'$s\,[h^{-1}\mathrm{Mpc}]$')
