@@ -29,14 +29,14 @@ pi_rebin = bin_size_2d
 # --- Jackknife configuration ---
 compute_jk_full = False            # applies only when force_recompute_full is True
 compute_jk_bins = True           # applies only when force_recompute_bin is True
-n_sub_per_side = 5                # number of sub‑divisions per side (125 sub‑boxes total)
+n_sub_per_side = 5                # number of sub‑divisions per side 
 
 # Split configuration
 split_vars = [
     {
         'col': 'dist_fil',
         'mode': 'custom_intervals',
-        'custom_intervals': [(0, 3), (5, 10), (10, 100)]
+        'custom_intervals': [(0, 3), (10, 100)]
     },
     # Uncomment to also split by rho_3:
     # {
@@ -212,7 +212,7 @@ def main():
                 min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
                 boxsize=L, n_sub_per_side=n_sub_per_side, nthreads=None
             )
-            np.savez(monopole_filename_full, s=s_jk, xi0=xi0_jk, cov=cov_jk)
+            np.savez(monopole_filename_full, s=s_jk, xi0=xi0_jk, cov=cov_jk, n_jk=int(n_sub_per_side**3))
             err_full = np.sqrt(np.diag(cov_jk))
             print(f"Saved monopole + covariance to {monopole_filename_full}")
         else:
