@@ -172,77 +172,231 @@ def compute_monopole_from_xi_s_mu(xi, mu_edges):
     return xi0
 
 
+# ---------------------------------------------------------------------------
+# Jackknife helpers
+# ---------------------------------------------------------------------------
+
+def _analytic_rr_2d(s_bins, mu_bins, N, V):
+    """
+    Analytic RR(s, μ) for N uniform random points in volume V.
+    Shape: (nbins_s, nbins_mu).
+    """
+    nbins_s = len(s_bins) - 1
+    nbins_mu = len(mu_bins) - 1
+    dmu = (mu_bins[-1] - mu_bins[0]) / nbins_mu          # uniform μ bins
+    RR = np.empty((nbins_s, nbins_mu))
+    for i in range(nbins_s):
+        vol_shell = (4 * np.pi / 3.0) * (s_bins[i + 1]**3 - s_bins[i]**3)
+        RR[i, :] = (N * (N - 1) / V) * (vol_shell * dmu)
+    return RR
+
+
+# ---------------------------------------------------------------------------
+# Jackknife helpers – shared memory version
+# ---------------------------------------------------------------------------
+
+# Global variables for workers (set by initializer)
+_jk_x = None
+_jk_y = None
+_jk_z = None
+_jk_particle_sub = None
+_jk_s_bins = None
+_jk_mu_max = None
+_jk_nbins_mu = None
+_jk_boxsize = None
+_jk_threads = None
+
+def _init_worker(x, y, z, particle_sub, s_bins, mu_max, nbins_mu, boxsize, threads):
+    global _jk_x, _jk_y, _jk_z, _jk_particle_sub, _jk_s_bins
+    global _jk_mu_max, _jk_nbins_mu, _jk_boxsize, _jk_threads
+    _jk_x = x
+    _jk_y = y
+    _jk_z = z
+    _jk_particle_sub = particle_sub
+    _jk_s_bins = s_bins
+    _jk_mu_max = mu_max
+    _jk_nbins_mu = nbins_mu
+    _jk_boxsize = boxsize
+    _jk_threads = threads
+
+def _jk_worker_shared(sub_id):
+    """Worker that accesses global arrays – no data duplication."""
+    mask_in = (_jk_particle_sub == sub_id)
+    mask_out = ~mask_in
+
+    x_in = _jk_x[mask_in]
+    y_in = _jk_y[mask_in]
+    z_in = _jk_z[mask_in]
+    x_out = _jk_x[mask_out]
+    y_out = _jk_y[mask_out]
+    z_out = _jk_z[mask_out]
+
+    nbins_s = len(_jk_s_bins) - 1
+
+    if len(x_in) >= 2:
+        dd_in = DDsmu(autocorr=1, nthreads=_jk_threads, binfile=_jk_s_bins,
+                      mu_max=_jk_mu_max, nmu_bins=_jk_nbins_mu,
+                      X1=x_in, Y1=y_in, Z1=z_in,
+                      periodic=True, boxsize=_jk_boxsize, verbose=False)
+        H_in = dd_in['npairs'].reshape(nbins_s, _jk_nbins_mu).astype(np.float64)
+    else:
+        H_in = np.zeros((nbins_s, _jk_nbins_mu))
+
+    dd_cross = DDsmu(autocorr=0, nthreads=_jk_threads, binfile=_jk_s_bins,
+                     mu_max=_jk_mu_max, nmu_bins=_jk_nbins_mu,
+                     X1=x_in, Y1=y_in, Z1=z_in,
+                     X2=x_out, Y2=y_out, Z2=z_out,
+                     periodic=True, boxsize=_jk_boxsize, verbose=False)
+    H_cross = dd_cross['npairs'].reshape(nbins_s, _jk_nbins_mu).astype(np.float64)
+
+    print(f"  Jackknife sub-volume {sub_id+1} done", flush=True)
+    return sub_id, H_in, H_cross
+
 def compute_jackknife_monopole_covariance(
     x, y, z,
     min_sep, max_sep, bin_size,
     boxsize=1000.0,
     n_sub_per_side=5,
     nthreads=None,
+    n_workers=None,
 ):
     """
     Compute the jackknife covariance matrix of the monopole ξ₀(s)
-    using spatial sub‑volumes of a periodic simulation box.
+    using spatial sub-volumes of a periodic simulation box.
+
+    Optimisation
+    ------------
+    Instead of re-running DDsmu on the full N − N_k leave-one-out catalog
+    for every realisation (O(N²) each), we use the **pair-subtraction trick**:
+
+        DD_loo_k = DD_full − DD_within_k − DD_cross_k
+
+    The two small counts scale as O((N/K)²) and O(N/K · (K−1)N/K) —
+    roughly K times cheaper than the naïve approach.  The loop over K
+    sub-volumes is then run in parallel across ``n_workers`` processes,
+    each using a single Corrfunc thread to avoid CPU over-subscription.
+
+    Parameters
+    ----------
+    n_workers : int, optional
+        Number of parallel worker processes.  Defaults to
+        ``min(cpu_count − 1, n_sub_total)``.  Set to 1 to disable
+        parallelism (useful for debugging).
 
     Returns
     -------
     s_centres : 1D array
-        Central separations of the monopole bins.
-    xi0_full : 1D array
-        Monopole of the full sample (the unbiased estimate).
-    cov : 2D array (n_bins × n_bins)
-        Jackknife covariance matrix of xi0_full.
+    xi0_full  : 1D array
+    cov       : 2D array (n_bins × n_bins)
     """
+    ncpu = multiprocessing.cpu_count()
     if nthreads is None:
-        nthreads = min(multiprocessing.cpu_count() - 4, 16)
+        nthreads = max(1, min(ncpu - 4, 16))
 
-    # 1. Full sample monopole (use full volume)
-    xi_full, s_bins, mu_bins = compute_xi_s_mu(
-        x, y, z,
-        min_sep, max_sep, bin_size,
-        boxsize=boxsize, nthreads=nthreads,
-        volume=boxsize**3
+    # ------------------------------------------------------------------ #
+    # 1. Bin definitions
+    # ------------------------------------------------------------------ #
+    nbins_s  = int((max_sep - min_sep) / bin_size)
+    s_bins   = np.linspace(min_sep, max_sep, nbins_s + 1)
+    nbins_mu = nbins_s * 2
+    mu_max   = 1.0
+    mu_bins  = np.linspace(0.0, mu_max, nbins_mu + 1)
+
+    # ------------------------------------------------------------------ #
+    # 2. Full-sample DD (computed once)
+    # ------------------------------------------------------------------ #
+    print("Computing DD for full sample …")
+    dd_full_result = DDsmu(
+        autocorr=1, nthreads=nthreads, binfile=s_bins,
+        mu_max=mu_max, nmu_bins=nbins_mu,
+        X1=x, Y1=y, Z1=z,
+        periodic=True, boxsize=boxsize, verbose=False,
     )
-    xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins)
-    s_centres = 0.5 * (s_bins[:-1] + s_bins[1:])
-    n_bins = len(s_centres)
+    H_dd_full = dd_full_result['npairs'].reshape(nbins_s, nbins_mu).astype(np.float64)
 
-    # 2. Assign particles to sub‑volumes
-    sub_edges = np.linspace(0, boxsize, n_sub_per_side + 1)
-    i_idx = np.clip(np.searchsorted(sub_edges, x, side='right') - 1, 0, n_sub_per_side - 1)
-    j_idx = np.clip(np.searchsorted(sub_edges, y, side='right') - 1, 0, n_sub_per_side - 1)
-    k_idx = np.clip(np.searchsorted(sub_edges, z, side='right') - 1, 0, n_sub_per_side - 1)
+    # Full-sample monopole
+    N = len(x)
+    V = boxsize**3
+    RR_full = _analytic_rr_2d(s_bins, mu_bins, N, V)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        xi_full = np.where(RR_full > 0, H_dd_full / RR_full - 1.0, np.nan)
+    xi0_full  = compute_monopole_from_xi_s_mu(xi_full, mu_bins)
+    s_centres = 0.5 * (s_bins[:-1] + s_bins[1:])
+    n_bins    = len(s_centres)
+
+    # ------------------------------------------------------------------ #
+    # 3. Assign particles to sub-volumes
+    # ------------------------------------------------------------------ #
+    sub_edges   = np.linspace(0, boxsize, n_sub_per_side + 1)
+    i_idx       = np.clip(np.searchsorted(sub_edges, x, side='right') - 1, 0, n_sub_per_side - 1)
+    j_idx       = np.clip(np.searchsorted(sub_edges, y, side='right') - 1, 0, n_sub_per_side - 1)
+    k_idx       = np.clip(np.searchsorted(sub_edges, z, side='right') - 1, 0, n_sub_per_side - 1)
     particle_sub = i_idx * n_sub_per_side**2 + j_idx * n_sub_per_side + k_idx
 
     n_sub_total = n_sub_per_side**3
-    sub_vol = (boxsize / n_sub_per_side)**3
-    volume_rem = boxsize**3 - sub_vol
+    sub_vol     = (boxsize / n_sub_per_side)**3
+    V_rem       = V - sub_vol
 
-    # 3. Compute leave‑one‑out monopoles
-    xi_sub_all = np.empty((n_sub_total, n_bins))
+    # ------------------------------------------------------------------ #
+    # 4. Parallel pair-subtraction over sub-volumes
+    # ------------------------------------------------------------------ #
+    # When parallelising, each worker uses 1 Corrfunc thread so the total
+    # thread count stays ≤ n_workers (avoids OpenMP over-subscription).
+    if n_workers is None:
+        n_workers = min(max(1, ncpu - 1), n_sub_total)
+    worker_threads = 1 if n_workers > 1 else nthreads
+
+    work_items = []
     for sub_id in range(n_sub_total):
-        mask = (particle_sub != sub_id)
-        if np.sum(mask) < 10:
-            print(f"Warning: sub‑volume {sub_id} contains almost all particles; using full sample as fallback")
+        mask_in  = (particle_sub == sub_id)
+        mask_out = ~mask_in
+        work_items.append((
+            sub_id, n_sub_total,
+            x[mask_in],  y[mask_in],  z[mask_in],
+            x[mask_out], y[mask_out], z[mask_out],
+            s_bins, mu_max, nbins_mu,
+            boxsize, worker_threads,
+        ))
+
+    print(f"Running {n_sub_total} jackknife realisations "
+          f"across {n_workers} worker(s) …")
+
+    xi_sub_all = np.empty((n_sub_total, n_bins))
+
+    if n_workers > 1:
+        with multiprocessing.Pool(
+            processes=n_workers,
+            initializer=_init_worker,
+            initargs=(x, y, z, particle_sub, s_bins, mu_max, nbins_mu, boxsize, worker_threads)
+        ) as pool:
+            results = pool.map(_jk_worker_shared, range(n_sub_total))
+    else:
+        results = [_jk_worker_shared(i) for i in range(n_sub_total)]
+
+    # ------------------------------------------------------------------ #
+    # 5. Reconstruct leave-one-out ξ₀ from subtracted pair counts
+    # ------------------------------------------------------------------ #
+    for sub_id, H_in, H_cross in results:
+        mask_in = (particle_sub == sub_id)
+        N_in  = int(np.sum(mask_in))
+        N_out = N - N_in
+
+        if N_in < 2:
+            print(f"Warning: sub-volume {sub_id} nearly empty; using full-sample fallback")
             xi_sub_all[sub_id] = xi0_full
             continue
 
-        print(f"Processing sub‑volume {sub_id+1}/{n_sub_total}")
+        H_loo  = H_dd_full - H_in - H_cross
+        RR_rem = _analytic_rr_2d(s_bins, mu_bins, N_out, V_rem)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            xi_loo = np.where(RR_rem > 0, H_loo / RR_rem - 1.0, np.nan)
+        xi_sub_all[sub_id] = compute_monopole_from_xi_s_mu(xi_loo, mu_bins)
 
-        x_sub, y_sub, z_sub = x[mask], y[mask], z[mask]
-        xi_sub, _, mu_bins_sub = compute_xi_s_mu(
-            x_sub, y_sub, z_sub,
-            min_sep, max_sep, bin_size,
-            boxsize=boxsize, nthreads=nthreads,
-            volume=volume_rem,             # corrected volume
-            force_recompute=True,
-            paircounts_filename=None
-        )
-        xi_sub_all[sub_id] = compute_monopole_from_xi_s_mu(xi_sub, mu_bins_sub)
-
-    # 4. Jackknife covariance (delete‑one formula)
+    # ------------------------------------------------------------------ #
+    # 6. Jackknife covariance  Cov = (K−1)/K · Σ (T_i − T̄)(T_i − T̄)ᵀ
+    # ------------------------------------------------------------------ #
     xi_bar = np.mean(xi_sub_all, axis=0)
-    diff = xi_sub_all - xi_bar   # (n_sub, n_bins)
-    # Standard jackknife covariance: (N-1)/N * sum (T_i - 𝔼[T])²
-    cov = (n_sub_total - 1) / n_sub_total * np.einsum('ij,ik->jk', diff, diff)
+    diff   = xi_sub_all - xi_bar
+    cov    = (n_sub_total - 1) / n_sub_total * np.einsum('ij,ik->jk', diff, diff)
 
     return s_centres, xi0_full, cov

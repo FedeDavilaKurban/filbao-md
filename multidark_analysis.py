@@ -16,20 +16,21 @@ from multidark_plotter import (plot_xi_s_mu, plot_xi_s_combined, plot_monopoles_
 L = 1000.0
 mag_max = -21.2
 test_dilute = 1.
-force_recompute_full = False      # set to True to recompute full sample + JK
+force_recompute_full = True      # set to True to recompute full sample + JK
 force_recompute_bin = True       # set to True to recompute bins + JK
 interpolate_to_xirppi = False
 
 # 2D correlation parameters
 min_sep_2d = 1.0
 max_sep_2d = 150.0
-bin_size_2d = 2.0
+bin_size_2d = 4.0
 pi_rebin = bin_size_2d
 
 # --- Jackknife configuration ---
-compute_jk_full = False            # applies only when force_recompute_full is True
+compute_jk_full = True            # applies only when force_recompute_full is True
 compute_jk_bins = True           # applies only when force_recompute_bin is True
-n_sub_per_side = 5                # number of sub‑divisions per side 
+n_sub_per_side = 3                # number of sub‑divisions per side 
+n_workers = 10
 
 # Split configuration
 split_vars = [
@@ -210,14 +211,16 @@ def main():
             s_jk, xi0_jk, cov_jk = compute_jackknife_monopole_covariance(
                 cat["x"].values, cat["y"].values, cat["z"].values,
                 min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
-                boxsize=L, n_sub_per_side=n_sub_per_side, nthreads=None
+                boxsize=L, n_sub_per_side=n_sub_per_side, n_workers=n_workers
             )
-            np.savez(monopole_filename_full, s=s_jk, xi0=xi0_jk, cov=cov_jk, n_jk=int(n_sub_per_side**3))
+            np.savez(monopole_filename_full, s=s_jk, xi0=xi0_jk, cov=cov_jk,
+         n_jk=int(n_sub_per_side**3), n_gal=len(cat)) 
             err_full = np.sqrt(np.diag(cov_jk))
             print(f"Saved monopole + covariance to {monopole_filename_full}")
         else:
             # No jackknife: save monopole without covariance
-            np.savez(monopole_filename_full, s=s_centers_full, xi0=xi0_full)
+            np.savez(monopole_filename_full, s=s_centers_full, xi0=xi0_full,
+         n_gal=len(cat))
             err_full = None
     else:
         # Not recomputing – but we need the xi_s_mu 2D array for later plots;
@@ -229,6 +232,8 @@ def main():
                 paircounts_filename=xismu_paircounts_filename_full,
                 force_recompute=False
             )
+        s_centers_full = 0.5 * (s_bins_full[:-1] + s_bins_full[1:])
+        xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins_full)
 
     # Store for combined plots
     monopoles_list = [(s_centers_full, xi0_full)]
@@ -301,23 +306,24 @@ def main():
                     min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
                     boxsize=L, n_sub_per_side=n_sub_per_side, nthreads=None
                 )
-                np.savez(monopole_filename_bin, s=s_jk, xi0=xi0_jk, cov=cov_jk)
+                np.savez(monopole_filename_bin, s=s_jk, xi0=xi0_jk, cov=cov_jk,
+         n_gal=len(gxs))
                 err_bin = np.sqrt(np.diag(cov_jk))
             else:
-                np.savez(monopole_filename_bin, s=s_centers_bin, xi0=xi0_bin)
+                np.savez(monopole_filename_bin, s=s_centers_bin, xi0=xi0_bin,
+         n_gal=len(gxs))
                 err_bin = None
         else:
             # Load xi_bin 2D for plots if needed
             if xi_bin is None:
-                xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(
-                    gxs["x"].values, gxs["y"].values, gxs["z"].values,
-                    min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
-                    paircounts_filename=xismu_paircounts_filename_bin,
-                    force_recompute=False
-                )
+                xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(...)
             else:
-                s_bins_bin = np.linspace(min_sep_2d, max_sep_2d, int((max_sep_2d - min_sep_2d) / bin_size_2d) + 1)
-                mu_bins_bin = np.linspace(0, 1, 2*int((max_sep_2d - min_sep_2d) / bin_size_2d) + 1)
+                s_bins_bin = np.linspace(min_sep_2d, max_sep_2d, int((max_sep_2d - min_sep_2d)/bin_size_2d)+1)
+                mu_bins_bin = np.linspace(0, 1, 2*int((max_sep_2d - min_sep_2d)/bin_size_2d)+1)
+
+            # 👇 Compute monopole and centres from the 2D array
+            s_centers_bin = 0.5 * (s_bins_bin[:-1] + s_bins_bin[1:])
+            xi0_bin = compute_monopole_from_xi_s_mu(xi_bin, mu_bins_bin)
 
         bin_results.append((xi_bin, s_bins_bin, mu_bins_bin, lab, bin_desc))
 
