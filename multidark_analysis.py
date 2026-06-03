@@ -22,8 +22,8 @@ interpolate_to_xirppi = False
 
 # 2D correlation parameters
 min_sep_2d = 1.0
-max_sep_2d = 150.0
-bin_size_2d = 4.0
+max_sep_2d = 180.0
+bin_size_2d = 2.5
 pi_rebin = bin_size_2d
 
 # --- Jackknife configuration ---
