@@ -21,15 +21,15 @@ force_recompute_bin = True       # set to True to recompute bins + JK
 interpolate_to_xirppi = False
 
 # 2D correlation parameters
-min_sep_2d = 1.0
-max_sep_2d = 180.0
-bin_size_2d = 2.5
+min_sep_2d = 5.0
+max_sep_2d = 150.0
+bin_size_2d = 5.0
 pi_rebin = bin_size_2d
 
 # --- Jackknife configuration ---
 compute_jk_full = True            # applies only when force_recompute_full is True
 compute_jk_bins = True           # applies only when force_recompute_bin is True
-n_sub_per_side = 3                # number of sub‑divisions per side 
+n_sub_per_side = 4                # number of sub‑divisions per side 
 n_workers = 10
 
 # Split configuration
@@ -304,10 +304,10 @@ def main():
                 s_jk, xi0_jk, cov_jk = compute_jackknife_monopole_covariance(
                     gxs["x"].values, gxs["y"].values, gxs["z"].values,
                     min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
-                    boxsize=L, n_sub_per_side=n_sub_per_side, nthreads=None
+                    boxsize=L, n_sub_per_side=n_sub_per_side, nthreads=None, n_workers=n_workers
                 )
                 np.savez(monopole_filename_bin, s=s_jk, xi0=xi0_jk, cov=cov_jk,
-         n_gal=len(gxs))
+            n_jk=int(n_sub_per_side**3), n_gal=len(gxs))
                 err_bin = np.sqrt(np.diag(cov_jk))
             else:
                 np.savez(monopole_filename_bin, s=s_centers_bin, xi0=xi0_bin,
@@ -316,7 +316,13 @@ def main():
         else:
             # Load xi_bin 2D for plots if needed
             if xi_bin is None:
-                xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(...)
+                xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(
+                    gxs["x"].values, gxs["y"].values, gxs["z"].values,
+                    min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
+                    paircounts_filename=xismu_paircounts_filename_bin,
+                    force_recompute=False,
+                    dfil_bin_metadata=meta
+                )
             else:
                 s_bins_bin = np.linspace(min_sep_2d, max_sep_2d, int((max_sep_2d - min_sep_2d)/bin_size_2d)+1)
                 mu_bins_bin = np.linspace(0, 1, 2*int((max_sep_2d - min_sep_2d)/bin_size_2d)+1)

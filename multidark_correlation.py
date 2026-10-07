@@ -59,7 +59,7 @@ def compute_xi_s_mu(x, y, z, min_sep, max_sep, bin_size,
 
     nbins_s = int((max_sep - min_sep) / bin_size)
     s_bins = np.linspace(min_sep, max_sep, nbins_s + 1)
-    nbins_mu = nbins_s * 2
+    nbins_mu = nbins_s #* 2
     mu_max = 1.0
     mu_bins = np.linspace(0.0, mu_max, nbins_mu + 1)
 
@@ -168,7 +168,8 @@ def compute_monopole_from_xi_s_mu(xi, mu_edges):
     """Integrate ξ(s, μ) over μ to get monopole ξ₀(s)."""
     mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
     dmu = mu_centers[1] - mu_centers[0] if len(mu_centers) > 1 else 1.0
-    xi0 = np.trapezoid(xi, dx=dmu, axis=1)
+    #xi0 = np.trapezoid(xi, dx=dmu, axis=1)
+    xi0 = xi.mean(axis=1)
     return xi0
 
 
@@ -298,7 +299,7 @@ def compute_jackknife_monopole_covariance(
     # ------------------------------------------------------------------ #
     nbins_s  = int((max_sep - min_sep) / bin_size)
     s_bins   = np.linspace(min_sep, max_sep, nbins_s + 1)
-    nbins_mu = nbins_s * 2
+    nbins_mu = 1 #nbins_s #* 2
     mu_max   = 1.0
     mu_bins  = np.linspace(0.0, mu_max, nbins_mu + 1)
 
@@ -346,17 +347,17 @@ def compute_jackknife_monopole_covariance(
         n_workers = min(max(1, ncpu - 1), n_sub_total)
     worker_threads = 1 if n_workers > 1 else nthreads
 
-    work_items = []
-    for sub_id in range(n_sub_total):
-        mask_in  = (particle_sub == sub_id)
-        mask_out = ~mask_in
-        work_items.append((
-            sub_id, n_sub_total,
-            x[mask_in],  y[mask_in],  z[mask_in],
-            x[mask_out], y[mask_out], z[mask_out],
-            s_bins, mu_max, nbins_mu,
-            boxsize, worker_threads,
-        ))
+    # work_items = []
+    # for sub_id in range(n_sub_total):
+    #     mask_in  = (particle_sub == sub_id)
+    #     mask_out = ~mask_in
+    #     work_items.append((
+    #         sub_id, n_sub_total,
+    #         x[mask_in],  y[mask_in],  z[mask_in],
+    #         x[mask_out], y[mask_out], z[mask_out],
+    #         s_bins, mu_max, nbins_mu,
+    #         boxsize, worker_threads,
+    #     ))
 
     print(f"Running {n_sub_total} jackknife realisations "
           f"across {n_workers} worker(s) …")
@@ -386,7 +387,7 @@ def compute_jackknife_monopole_covariance(
             xi_sub_all[sub_id] = xi0_full
             continue
 
-        H_loo  = H_dd_full - H_in - H_cross
+        H_loo  = H_dd_full - H_in - 2.*H_cross
         RR_rem = _analytic_rr_2d(s_bins, mu_bins, N_out, V_rem)
         with np.errstate(divide='ignore', invalid='ignore'):
             xi_loo = np.where(RR_rem > 0, H_loo / RR_rem - 1.0, np.nan)
