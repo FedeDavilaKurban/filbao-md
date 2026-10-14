@@ -9,6 +9,7 @@ from multidark_correlation import (compute_xi_s_mu, compute_xi_s, compute_monopo
                          get_save_filename, compute_jackknife_monopole_covariance)
 from multidark_plotter import (plot_xi_s_mu, plot_xi_s_combined, plot_monopoles_combined,
                      plot_monopole_to_xi_s_ratio, plot_xi_sigma_pi_from_xi_s_mu)
+from multidark_power import measure_spectra
 
 # ---------------------------
 # CONFIGURATION
@@ -16,8 +17,8 @@ from multidark_plotter import (plot_xi_s_mu, plot_xi_s_combined, plot_monopoles_
 L = 1000.0
 mag_max = -21.2
 test_dilute = 1.
-force_recompute_full = True      # set to True to recompute full sample + JK
-force_recompute_bin = True       # set to True to recompute bins + JK
+force_recompute_full = False      # set to True to recompute full sample + JK
+force_recompute_bin = False       # set to True to recompute bins + JK
 interpolate_to_xirppi = False
 
 # 2D correlation parameters
@@ -29,8 +30,18 @@ pi_rebin = bin_size_2d
 # --- Jackknife configuration ---
 compute_jk_full = True            # applies only when force_recompute_full is True
 compute_jk_bins = True           # applies only when force_recompute_bin is True
-n_sub_per_side = 4                # number of sub‑divisions per side 
+n_sub_per_side = 4                # number of sub‑divisions per side
 n_workers = 10
+# NOTE: the box jackknife overestimates the monopole errors on BAO scales by 1.5-6x
+# (validation V6 in bao_fitting_gaussian.ipynb).  The BAO fit uses the Gaussian covariance
+# built from the measured power spectra below; the jackknife is kept only as a diagnostic.
+
+# --- Power spectra (for the covariance used in the BAO fit) ---
+compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min, ~1-2 GB)
+pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
+
+# --- Uniformity check of every sample (analytic randoms assume uniform samples) ---
+check_uniformity = True
 
 # Split configuration
 split_vars = [
@@ -60,6 +71,7 @@ output_folder = f"../plots/{folderName}/"
 paircounts_dir = "../data/pair_counts/box"
 monopoles_dir = "../data/monopoles/box"
 xis_dir = "../data/xis/box"
+spectra_dir = "../data/pk/box"
 
 # Create folders
 if os.path.exists(output_folder):
@@ -68,6 +80,7 @@ os.makedirs(output_folder, exist_ok=True)
 os.makedirs(paircounts_dir, exist_ok=True)
 os.makedirs(monopoles_dir, exist_ok=True)
 os.makedirs(xis_dir, exist_ok=True)
+os.makedirs(spectra_dir, exist_ok=True)
 
 # ---------------------------
 # HELPER FUNCTIONS
@@ -80,7 +93,7 @@ def make_bin_desc_from_label(label, dilute=None):
     # Replace variable names
     label = label.replace('d_{fil}', 'dfil')
     label = label.replace('log_{10} rho_3', 'log10rho3')
-    
+
     # Remove LaTeX symbols and spaces
     label = label.replace('$', '')
     label = label.replace('\\', '')
@@ -97,17 +110,17 @@ def make_bin_desc_from_label(label, dilute=None):
 
     # Remove any remaining illegal filename characters
     label = re.sub(r'[^\w\-_\.]', '_', label)  # only allow letters, numbers, -, _, .
-    
+
     # Collapse multiple underscores/hyphens
     label = re.sub(r'_+', '_', label)
     label = re.sub(r'-+', '-', label)
-    
+
     # Optional: add dilute parameter
     if dilute is not None and dilute < 1.0:
         label = f"dilute{dilute}_{label}"
     else:
         label = f"{label}"
-    
+
     return label
 
 # ---------------------------
@@ -141,6 +154,28 @@ def main():
     print(f"Split into {len(bins)} bins:")
     for i, (b, lab) in enumerate(zip(bins, labels)):
         print(f"  Bin {i}: {len(b)} galaxies, {lab}")
+
+    # Uniformity check: fractional deviation of the counts in 10 slabs of 100 h^-1 Mpc along
+    # each axis.  Expect |dev| of order the Poisson value printed (plus ~1% from real structure);
+    # much larger values, especially in the slabs at the box faces, mean the selection is not
+    # uniform and the analytic RR is wrong for that sample.
+    if check_uniformity:
+        print("\nSlab counts (N_slab / <N_slab> - 1):")
+        for gxs, lab in [(cat, 'Full Sample')] + list(zip(bins, labels)):
+            for ax in ('x', 'y', 'z'):
+                h, _ = np.histogram(gxs[ax].values, bins=10, range=(0, L))
+                print(f"  {lab:40s} {ax}: {np.round(h / h.mean() - 1, 3)}  "
+                      f"(max |dev| = {np.abs(h / h.mean() - 1).max():.3f}; Poisson rms = {1 / np.sqrt(h.mean()):.3f})")
+
+    # Auto- and cross-power spectra of all samples, read by bao_fitting_gaussian.ipynb
+    # (run_all(..., pk_file=...)) to build the covariance.  Labels = the <bin_desc> used in the
+    # monopole file names ('full' for the full sample), so the notebook matches them automatically.
+    if compute_spectra:
+        pk_labels = ['full'] + [make_bin_desc_from_label(lab, dilute=test_dilute) for lab in labels]
+        pk_file = os.path.join(spectra_dir, f"pk_{folderName}.npz")
+        print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
+        measure_spectra([cat[['x', 'y', 'z']].values] + [g[['x', 'y', 'z']].values for g in bins],
+                        pk_labels, L, ng=pk_ngrid, save=pk_file)
 
     # Diagnostic plots
     subsample_cols = [v['col'] for v in split_vars] if split_vars else None
@@ -214,7 +249,7 @@ def main():
                 boxsize=L, n_sub_per_side=n_sub_per_side, n_workers=n_workers
             )
             np.savez(monopole_filename_full, s=s_jk, xi0=xi0_jk, cov=cov_jk,
-         n_jk=int(n_sub_per_side**3), n_gal=len(cat)) 
+         n_jk=int(n_sub_per_side**3), n_gal=len(cat))
             err_full = np.sqrt(np.diag(cov_jk))
             print(f"Saved monopole + covariance to {monopole_filename_full}")
         else:
