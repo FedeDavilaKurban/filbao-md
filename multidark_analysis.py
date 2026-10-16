@@ -24,7 +24,7 @@ interpolate_to_xirppi = False
 # 2D correlation parameters
 min_sep_2d = 5.0
 max_sep_2d = 150.0
-bin_size_2d = 5.0
+bin_size_2d = 2.5                 # 2.5 h^-1 Mpc: same sigma(alpha) as 5, ~15% better sigma(Sigma) for filaments
 pi_rebin = bin_size_2d
 
 # --- Jackknife configuration ---
@@ -48,6 +48,18 @@ pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for
 #               BAO scales by 1.5-6x; kept for comparison only)
 # None        : no error bands
 plot_error_type = 'gaussian'
+
+# --- Random dilutions of the full sample: controls for the number density ---
+# For each bin chosen below, add a random subsample of the FULL sample with exactly the same
+# number of galaxies.  It has Full's clustering and BAO, only a lower nbar, so comparing a bin
+# with its control separates 'this environment' from 'fewer galaxies'.  It is treated as one more
+# bin: pair counts, monopole, spectra (incl. cross-spectra with every other sample) and plots.
+#   'all'  : one control per bin            [0, 1] : only for these bins (index in the split)
+#   []     : none
+# The seed is part of the file name, so changing it never reuses old pair counts.
+dilution_controls = 'all'
+n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...)
+dilution_seed = 20261016
 
 # --- Uniformity check of every sample (analytic randoms assume uniform samples) ---
 check_uniformity = True
@@ -159,6 +171,26 @@ def main():
         bins = [cat]
         labels = ['Full Sample']
         bin_metadata = [None]
+
+    # Random dilutions of the full sample (number-density controls), appended as extra bins
+    if dilution_controls:
+        targets = range(len(bins)) if dilution_controls == 'all' else list(dilution_controls)
+        new_bins, new_labels, new_meta = [], [], []
+        for t in targets:
+            n_target = len(bins[t])
+            for r in range(n_dilution_realisations):
+                seed = dilution_seed + r
+                rng = np.random.default_rng(seed)
+                idx = np.sort(rng.choice(len(cat), size=n_target, replace=False))
+                new_bins.append(cat.iloc[idx])
+                new_labels.append(f"Full random N={n_target} r{seed}")
+                new_meta.append({'dilution_of': labels[t], 'dilution_seed': seed,
+                                 'n_target': n_target})
+                print(f"Control: random {n_target} of {len(cat)} Full galaxies "
+                      f"(matches '{labels[t]}', seed {seed})")
+        bins = list(bins) + new_bins
+        labels = list(labels) + new_labels
+        bin_metadata = list(bin_metadata) + new_meta
 
     print(f"Split into {len(bins)} bins:")
     for i, (b, lab) in enumerate(zip(bins, labels)):
