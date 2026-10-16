@@ -1,7 +1,7 @@
 """
 Auto- and cross-power spectra of galaxy samples in a periodic box.
 
-Used by filbao_fit.gaussian_cov_pk to build the Gaussian covariance of the xi monopole
+Used by bao_fitting_gaussian.ipynb (gaussian_cov_pk) and by xi_covariance_from_spectra below to build the Gaussian covariance of the xi monopole
 from the MEASURED spectra instead of b^2 P_lin + 1/nbar.  That captures any non-Poisson
 (excess) shot noise and small-scale clustering of a selected sample, e.g. galaxies selected
 by distance to DisPerSE filaments, and the cross-spectra give the correlation between
@@ -92,3 +92,110 @@ def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, kmax
         np.savez(save, **out)
         print(f"Saved spectra of {list(labels)} -> {save}")
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Standalone Gaussian covariance of the xi monopole from the measured spectra
+# (no CAMB, no fitting: usable directly in multidark_analysis.py for the error bands of plots)
+# ---------------------------------------------------------------------------------------------
+
+def shell_avg_j0(k, s_lo, s_hi):
+    """Volume average of j0(k s) over each shell s_lo < s < s_hi (what DD/RR - 1 measures in a
+    bin), using  int s^2 j0(ks) ds = [sin(ks) - ks cos(ks)] / k^3.  Shape (n_bins, n_k)."""
+    k = np.asarray(k, float)[None, :]
+    a = np.asarray(s_lo, float)[:, None]; b = np.asarray(s_hi, float)[:, None]
+    F = lambda s: (np.sin(k * s) - k * s * np.cos(k * s)) / k**3
+    return 3.0 * (F(b) - F(a)) / (b**3 - a**3)
+
+
+def _lattice_modes(L, kmax):
+    """Exact number of Fourier modes n != 0 of the periodic box at each |k| <= kmax."""
+    kf = 2 * np.pi / L
+    nmax = int(np.floor(kmax / kf))
+    n = np.arange(-nmax, nmax + 1)
+    n2 = (n[:, None, None]**2 + n[None, :, None]**2 + n[None, None, :]**2).ravel()
+    cnt = np.bincount(n2[n2 <= nmax**2], minlength=nmax**2 + 1).astype(float)
+    cnt[0] = 0.0
+    m = np.nonzero(cnt)[0]
+    return kf * np.sqrt(m), cnt[m]
+
+
+def power_for_cov(spec, a, b, k, k_smooth=(0.08, 0.15), kfit_max=0.25, deg=4, kuse_frac=0.6):
+    """
+    Total power P_ab(k) (clustering + shot noise, as measured) to put in the covariance.
+      k >= k_smooth[1]       : the measured spectrum (millions of modes: precise)
+      k <= k_smooth[0]       : a smooth fit to the measured spectrum (polynomial in log k over
+                               k <= kfit_max, weighted by the Gaussian error of each shell).
+                               The few low-k modes are noisy (e.g. +-25 % at k = 0.01), and
+                               plugging that noise into the covariance would make it noisy too.
+      in between             : linear blend
+      k > kuse_frac * k_Nyq  : extrapolated with N + A k^-n fitted on [0.5, 1] x that k (grid
+                               effects grow near Nyquist); contributes little on > 5 h^-1 Mpc
+    """
+    km, P, nm = spec['k'], spec['P'][a, b], spec['nmodes']
+    Paa, Pbb = spec['P'][a, a], spec['P'][b, b]
+    sig = np.sqrt((Paa * Pbb + P**2) / np.maximum(nm, 1))          # Gaussian error of each shell
+    mf = km <= kfit_max
+    coef = np.polyfit(np.log(km[mf]), P[mf], deg, w=1.0 / sig[mf])
+    smooth = np.polyval(coef, np.log(np.maximum(k, km[0])))
+    kuse = kuse_frac * float(spec['kNyq'])
+    ok = km <= kuse
+    meas = np.interp(k, km[ok], P[ok])
+    # beyond kuse: P = N + A k^-n fitted on [0.5, 1] kuse (a white plateau plus a decaying
+    # clustering term), so neither the plateau nor the clustering is frozen at its kuse value
+    mt = (km >= 0.5 * kuse) & ok
+    tail = np.full_like(np.asarray(k, float), P[ok][-1])
+    try:
+        from scipy.optimize import curve_fit
+        f = lambda x, N, A, n: N + A * x**(-n)
+        p0 = (P[mt][-1] * 0.8, P[mt][-1] * 0.2 * kuse**1.5, 1.5)
+        popt, _ = curve_fit(f, km[mt], P[mt], p0=p0, sigma=sig[mt], maxfev=20000,
+                            bounds=([-np.inf, 0.0, 0.0], [np.inf, np.inf, 4.0]))
+        tail = f(np.maximum(k, kuse), *popt)
+    except Exception:
+        pass
+    t = np.clip((k - k_smooth[0]) / (k_smooth[1] - k_smooth[0]), 0, 1)
+    out = (1 - t) * smooth + t * meas
+    return np.where(k > kuse, tail, out)
+
+
+def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3, dk=5e-4, **kw):
+    """
+    Joint Gaussian covariance of the bin-averaged xi monopoles of the samples `labels`
+    (default: all) in a periodic box, from their MEASURED auto- and cross-spectra:
+
+        Cov[xi_A(i), xi_B(j)] = (2 / V^2) sum_k P_AB(k)^2 <j0>_i(k) <j0>_j(k),     V = L^3
+
+    (same formula as gaussian_cov_pk in bao_fitting_gaussian.ipynb, which uses linear theory
+    instead of a smooth fit at k < 0.08).  Modes: exact lattice count for k < k_exact, smooth
+    4 pi k^2 dk / k_f^3 above.  spec: dict from measure_spectra or the saved .npz path.
+    Returns (C, labels); C has shape (n_samples * n_bins, n_samples * n_bins), blocks ordered
+    as `labels`.
+    """
+    if isinstance(spec, str):
+        d = np.load(spec, allow_pickle=True); spec = {key: d[key] for key in d.files}
+    all_labels = [str(x) for x in spec['labels']]
+    labels = all_labels if labels is None else list(labels)
+    idx = [all_labels.index(l) for l in labels]
+    L = float(spec['L']); V = L**3; kf = 2 * np.pi / L
+    k1, c1 = _lattice_modes(L, k_exact)
+    k2 = np.arange(k1[-1] + 0.5 * dk, kmax, dk)
+    kk = np.concatenate([k1, k2]); cnt = np.concatenate([c1, 4 * np.pi * k2**2 * dk / kf**3])
+    s_edges = np.asarray(s_edges, float)
+    J = shell_avg_j0(kk, s_edges[:-1], s_edges[1:])
+    nb = J.shape[0]; T = len(idx)
+    C = np.zeros((T * nb, T * nb))
+    for A in range(T):
+        for B in range(A, T):
+            PAB = power_for_cov(spec, idx[A], idx[B], kk, **kw)
+            blk = (2.0 / V**2) * (J * (cnt * PAB**2)) @ J.T
+            C[A*nb:(A+1)*nb, B*nb:(B+1)*nb] = blk
+            C[B*nb:(B+1)*nb, A*nb:(A+1)*nb] = blk.T
+    return C, labels
+
+
+def xi_errors_from_spectra(spec, s_edges, labels=None, **kw):
+    """{label: sigma(xi_0) per bin} = sqrt of the diagonal of xi_covariance_from_spectra."""
+    C, labels = xi_covariance_from_spectra(spec, s_edges, labels, **kw)
+    nb = len(s_edges) - 1
+    return {l: np.sqrt(np.diag(C)[i*nb:(i+1)*nb]) for i, l in enumerate(labels)}

@@ -9,7 +9,7 @@ from multidark_correlation import (compute_xi_s_mu, compute_xi_s, compute_monopo
                          get_save_filename, compute_jackknife_monopole_covariance)
 from multidark_plotter import (plot_xi_s_mu, plot_xi_s_combined, plot_monopoles_combined,
                      plot_monopole_to_xi_s_ratio, plot_xi_sigma_pi_from_xi_s_mu)
-from multidark_power import measure_spectra
+from multidark_power import measure_spectra, xi_covariance_from_spectra
 
 # ---------------------------
 # CONFIGURATION
@@ -39,6 +39,15 @@ n_workers = 10
 # --- Power spectra (for the covariance used in the BAO fit) ---
 compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min, ~1-2 GB)
 pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
+
+# --- Error bands in the plots ---
+# 'gaussian'  : Gaussian covariance from the MEASURED auto/cross power spectra
+#               (multidark_power.xi_covariance_from_spectra; validated against the lognormal test V6
+#               of bao_fitting_gaussian.ipynb).  Needs the spectra file (compute_spectra = True once).
+# 'jackknife' : the box jackknife stored in the monopole files (overestimates the errors on
+#               BAO scales by 1.5-6x; kept for comparison only)
+# None        : no error bands
+plot_error_type = 'gaussian'
 
 # --- Uniformity check of every sample (analytic randoms assume uniform samples) ---
 check_uniformity = True
@@ -170,12 +179,30 @@ def main():
     # Auto- and cross-power spectra of all samples, read by bao_fitting_gaussian.ipynb
     # (run_all(..., pk_file=...)) to build the covariance.  Labels = the <bin_desc> used in the
     # monopole file names ('full' for the full sample), so the notebook matches them automatically.
+    pk_labels = ['full'] + [make_bin_desc_from_label(lab, dilute=test_dilute) for lab in labels]
+    pk_file = os.path.join(spectra_dir, f"pk_{folderName}.npz")
     if compute_spectra:
-        pk_labels = ['full'] + [make_bin_desc_from_label(lab, dilute=test_dilute) for lab in labels]
-        pk_file = os.path.join(spectra_dir, f"pk_{folderName}.npz")
         print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
         measure_spectra([cat[['x', 'y', 'z']].values] + [g[['x', 'y', 'z']].values for g in bins],
                         pk_labels, L, ng=pk_ngrid, save=pk_file)
+
+    # Gaussian covariance of the monopoles of all samples (joint: includes the cross-covariances
+    # between samples) from the measured spectra.  Used for the error bands of the plots and saved
+    # for any later use; the BAO fit in the notebook rebuilds it with linear theory at k < 0.08.
+    gauss_err = None
+    if plot_error_type == 'gaussian':
+        if os.path.exists(pk_file):
+            nb_s = int(round((max_sep_2d - min_sep_2d) / bin_size_2d))
+            s_edges_cov = np.linspace(min_sep_2d, max_sep_2d, nb_s + 1)
+            C_xi, lab_cov = xi_covariance_from_spectra(pk_file, s_edges_cov, labels=pk_labels)
+            cov_file = os.path.join(spectra_dir, f"cov_xi0_{folderName}_binsep{bin_size_2d:.1f}.npz")
+            np.savez(cov_file, cov=C_xi, labels=np.array(lab_cov), s_edges=s_edges_cov,
+                     note="joint Gaussian covariance of the xi monopoles, blocks ordered as labels")
+            gauss_err = {l: np.sqrt(np.diag(C_xi)[i*nb_s:(i+1)*nb_s]) for i, l in enumerate(lab_cov)}
+            print(f"Gaussian covariance from measured spectra -> {cov_file}")
+        else:
+            print(f"WARNING: {pk_file} not found (set compute_spectra = True once); "
+                  "falling back to jackknife error bands")
 
     # Diagnostic plots
     subsample_cols = [v['col'] for v in split_vars] if split_vars else None
@@ -412,6 +439,13 @@ def main():
                      plotname=f"xi_s_mu_{bin_desc}.png", min_sep=min_sep_2d,
                      vmin_global=vmin_global, vmax_global=vmax_global,
                      contour_levels=contour_levels, contour_colors='black')
+
+    # Error bands: Gaussian from the measured spectra (default), jackknife, or none
+    if plot_error_type == 'gaussian' and gauss_err is not None:
+        monopoles_errors = [gauss_err[l] for l in pk_labels]       # same order: Full, then bins
+        xi_s_errors = monopoles_errors                              # xi(s) = monopole: same errors
+    elif plot_error_type is None:
+        monopoles_errors = None
 
     # ------------------------------------------------------------------
     # Combined plots – pass errors (plotter handles None gracefully)
