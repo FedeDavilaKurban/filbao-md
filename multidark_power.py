@@ -120,7 +120,8 @@ def _lattice_modes(L, kmax):
     return kf * np.sqrt(m), cnt[m]
 
 
-def power_for_cov(spec, a, b, k, k_smooth=(0.08, 0.15), kfit_max=0.25, deg=4, kuse_frac=0.6):
+def power_for_cov(spec, a, b, k, k_smooth=(0.08, 0.15), kfit_max=0.25, deg=4, kuse_frac=0.6,
+                  return_tail=False):
     """
     Total power P_ab(k) (clustering + shot noise, as measured) to put in the covariance.
       k >= k_smooth[1]       : the measured spectrum (millions of modes: precise)
@@ -145,6 +146,7 @@ def power_for_cov(spec, a, b, k, k_smooth=(0.08, 0.15), kfit_max=0.25, deg=4, ku
     # clustering term), so neither the plateau nor the clustering is frozen at its kuse value
     mt = (km >= 0.5 * kuse) & ok
     tail = np.full_like(np.asarray(k, float), P[ok][-1])
+    N_tail = float(P[ok][-1])                                        # constant plateau
     try:
         from scipy.optimize import curve_fit
         f = lambda x, N, A, n: N + A * x**(-n)
@@ -152,14 +154,17 @@ def power_for_cov(spec, a, b, k, k_smooth=(0.08, 0.15), kfit_max=0.25, deg=4, ku
         popt, _ = curve_fit(f, km[mt], P[mt], p0=p0, sigma=sig[mt], maxfev=20000,
                             bounds=([-np.inf, 0.0, 0.0], [np.inf, np.inf, 4.0]))
         tail = f(np.maximum(k, kuse), *popt)
+        N_tail = float(popt[0])
     except Exception:
         pass
     t = np.clip((k - k_smooth[0]) / (k_smooth[1] - k_smooth[0]), 0, 1)
     out = (1 - t) * smooth + t * meas
-    return np.where(k > kuse, tail, out)
+    out = np.where(k > kuse, tail, out)
+    return (out, N_tail) if return_tail else out
 
 
-def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3, dk=5e-4, **kw):
+def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3, dk=5e-4,
+                               analytic_shot=True, **kw):
     """
     Joint Gaussian covariance of the bin-averaged xi monopoles of the samples `labels`
     (default: all) in a periodic box, from their MEASURED auto- and cross-spectra:
@@ -171,6 +176,11 @@ def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3
     4 pi k^2 dk / k_f^3 above.  spec: dict from measure_spectra or the saved .npz path.
     Returns (C, labels); C has shape (n_samples * n_bins, n_samples * n_bins), blocks ordered
     as `labels`.
+
+    analytic_shot=True: the constant plateau N_AB (shot noise incl. any excess) is squared and
+    summed over ALL modes analytically (sum_k <j0>_i <j0>_j = V delta_ij / V_shell), giving the
+    exact 2 N^2 / (V V_shell) diagonal term; the rest is summed to kmax.  Makes the result
+    independent of kmax for narrow bins (same as gaussian_cov_pk in the notebook).
     """
     if isinstance(spec, str):
         d = np.load(spec, allow_pickle=True); spec = {key: d[key] for key in d.files}
@@ -184,11 +194,16 @@ def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3
     s_edges = np.asarray(s_edges, float)
     J = shell_avg_j0(kk, s_edges[:-1], s_edges[1:])
     nb = J.shape[0]; T = len(idx)
+    V_shell = 4.0 * np.pi / 3.0 * (s_edges[1:]**3 - s_edges[:-1]**3)
     C = np.zeros((T * nb, T * nb))
     for A in range(T):
         for B in range(A, T):
-            PAB = power_for_cov(spec, idx[A], idx[B], kk, **kw)
-            blk = (2.0 / V**2) * (J * (cnt * PAB**2)) @ J.T
+            PAB, N_AB = power_for_cov(spec, idx[A], idx[B], kk, return_tail=True, **kw)
+            if analytic_shot:
+                blk = (2.0 / V**2) * (J * (cnt * (PAB**2 - N_AB**2))) @ J.T
+                blk = blk + np.diag(2.0 * N_AB**2 / (V * V_shell))
+            else:
+                blk = (2.0 / V**2) * (J * (cnt * PAB**2)) @ J.T
             C[A*nb:(A+1)*nb, B*nb:(B+1)*nb] = blk
             C[B*nb:(B+1)*nb, A*nb:(A+1)*nb] = blk.T
     return C, labels
