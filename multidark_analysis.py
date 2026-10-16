@@ -24,7 +24,7 @@ interpolate_to_xirppi = False
 # 2D correlation parameters
 min_sep_2d = 5.0
 max_sep_2d = 150.0
-bin_size_2d = 2.5                 # 2.5 h^-1 Mpc: same sigma(alpha) as 5, ~15% better sigma(Sigma) for filaments
+bin_size_2d = 5.0                 # 2.5 h^-1 Mpc: same sigma(alpha) as 5, ~15% better sigma(Sigma) for filaments
 pi_rebin = bin_size_2d
 
 # --- Jackknife configuration ---
