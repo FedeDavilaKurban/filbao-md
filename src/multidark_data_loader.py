@@ -1,17 +1,21 @@
+"""
+Galaxy catalogue and subsamples for the FilBAO box analysis.
+
+    load_catalog          read the MultiDark mock and attach the filament distance
+    select_sample         absolute-magnitude cut
+    compute_knn_distance  distance to the k-th neighbour (for rho_3, the local density)
+    split_by_variable     subsamples in one variable, or the 2D (cartesian) product of two
+"""
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.colors import SymLogNorm
-import os
 from scipy.spatial import cKDTree
 
-def load_catalog(data_path="../data/to_mock.csv",
-                 filament_path="../data/mock_withfilament.csv",
-                 mag_col='magstarsdssr',
-                 rename_mag='mag_abs_r',
+
+def load_catalog(data_path, filament_path, mag_col='magstarsdssr', rename_mag='mag_abs_r',
                  dist_col='dist_fil'):
-    """Load galaxy catalog and filament distances."""
-    df = pd.read_csv(data_path, usecols=['x','y','z','vx','vy','vz', mag_col])
+    """Galaxy positions, velocities and magnitude, plus the distance to the nearest filament
+    (same galaxies, same row order in both files)."""
+    df = pd.read_csv(data_path, usecols=['x', 'y', 'z', 'vx', 'vy', 'vz', mag_col])
     df_fil = pd.read_csv(filament_path)
     if dist_col in df_fil.columns:
         df[dist_col] = df_fil[dist_col].values
@@ -22,296 +26,83 @@ def load_catalog(data_path="../data/to_mock.csv",
     df.rename(columns={mag_col: rename_mag}, inplace=True)
     return df
 
-def select_sample(cat, mag_max, mag_col='mag_abs_r', test_dilute=1.0):
-    """Apply magnitude cut and optional dilution."""
-    cat = cat[cat[mag_col] < mag_max].copy()
-    if test_dilute < 1.0:
-        cat = cat.sample(frac=test_dilute, random_state=42).reset_index(drop=True)
-    return cat
 
-def split_by_dist_fil_bins(cat, mode, custom_intervals=None,
-                           percentile_intervals=None,
-                           nbins=4, fixed_edges=None,
-                           dist_col='dist_fil'):
-    """
-    Split catalog by distance to filament.
-    Returns (list of DataFrames, list of labels, edges).
-    """
-    values = cat[dist_col].values
+def select_sample(cat, mag_max, mag_col='mag_abs_r'):
+    """Galaxies brighter than mag_max."""
+    return cat[cat[mag_col] < mag_max].copy()
 
-    if mode == "custom_intervals":
-        intervals = custom_intervals
-        bins, labels = [], []
-        for lo, hi in intervals:
-            mask = (values >= lo) & (values <= hi)
-            bins.append(cat.loc[mask].copy())
-            labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
-        return bins, labels, None
-
-    elif mode == "percentile_intervals":
-        if percentile_intervals is None:
-            raise ValueError("percentile_intervals must be provided for mode 'percentile_intervals'")
-        bins, labels = [], []
-        for lo_pct, hi_pct in percentile_intervals:
-            lo_val = np.percentile(values, lo_pct)
-            hi_val = np.percentile(values, hi_pct)
-            mask = (values >= lo_val) & (values <= hi_val)
-            bins.append(cat.loc[mask].copy())
-            labels.append(f"$r_{{fil}} \\in [{lo_val:.1f}-{hi_val:.1f}]$ Mpc/h")
-        return bins, labels, None
-
-    elif mode == "percentile":
-        percentiles = np.linspace(0, 100, nbins + 1)
-        edges = np.percentile(values, percentiles)
-    elif mode == "equal_width":
-        vmin, vmax = values.min(), values.max()
-        edges = np.linspace(vmin, vmax, nbins + 1)
-    elif mode == "fixed":
-        edges = np.array(fixed_edges)
-    else:
-        raise ValueError(f"Unknown dist_bin_mode: {mode}")
-
-    bins, labels = [], []
-    for i in range(len(edges) - 1):
-        lo, hi = edges[i], edges[i + 1]
-        if i == len(edges) - 2:
-            mask = (values >= lo) & (values <= hi)
-        else:
-            mask = (values >= lo) & (values < hi)
-        bins.append(cat.loc[mask].copy())
-        labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
-    return bins, labels, edges
-
-def plot_magnitude_hist(cat, mag_max, output_folder, mag_col='mag_abs_r'):
-    """Save magnitude histogram with cut line."""
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.hist(cat[mag_col], bins=40, color="C00", alpha=0.8)
-    ax.set_yscale("log")
-    ax.axvline(mag_max, color="k", linestyle=":")
-    ax.set_xlabel("Absolute magnitude r")
-    ax.set_ylabel("Count")
-    os.makedirs(output_folder, exist_ok=True)
-    fig.savefig(os.path.join(output_folder, "magnitude_hist.png"), dpi=100, bbox_inches="tight")
-    plt.close(fig)
-
-def plot_bin_data(gxs, label, output_folder, filename=None, subsample_cols=None):
-    """
-    Plot 2D spatial slice and histograms.
-    
-    Parameters
-    ----------
-    gxs : DataFrame
-        Galaxy sample.
-    label : str
-        Label for title.
-    output_folder : str
-        Folder to save the plot.
-    filename : str, optional
-        Output filename.
-    subsample_cols : list[str], optional
-        Columns used for subsampling (1 or 2). Determines histogram layout.
-    """
-    if subsample_cols is None:
-        subsample_cols = ["dist_fil"]  # default to single-variable
-
-    n_hist = len(subsample_cols)
-    fig, axes = plt.subplots(1 + n_hist, 1, figsize=(7, 5*(1+n_hist)))
-    
-    # ensure axes is always a list
-    #if n_hist == 1:
-    #    axes = [axes]
-    #axes0 = axes[0]
-    axes0 = axes if isinstance(axes, plt.Axes) else axes[0]
-
-    # 2D spatial plot
-    gxs_plot = gxs[gxs["z"] < 100.]
-    h, xedges, yedges, im = axes0.hist2d(
-        gxs_plot["x"], gxs_plot["y"],
-        bins=100, cmap="Blues",
-        norm=SymLogNorm(linthresh=1, vmin=1, vmax=gxs_plot.shape[0]/500)
-    )
-    fig.colorbar(im, ax=axes0, label="N. of galaxies")
-    axes0.set_xlabel("x [Mpc/h]")
-    axes0.set_ylabel("y [Mpc/h]")
-    axes0.set_title(label + f" (z < 100 Mpc/h, N={len(gxs_plot)} of {len(gxs)})")
-    axes0.set_aspect('equal')
-
-    # 1D histograms for subsample variables
-    for i, col in enumerate(subsample_cols):
-        axes[i+1].hist(gxs[col], bins=40, density=True, color="C03", alpha=0.9)
-        if col == "dist_fil":
-            axes[i+1].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
-        elif col in ["rho_3", "log_rho_3"]:
-            axes[i+1].set_xlabel(r"$\rho_3$ [h$^{-1}$ Mpc]" if col=="rho_3" else r"$\log_{10} \rho_3$")
-        else:
-            axes[i+1].set_xlabel(col)
-        axes[i+1].set_ylabel("PDF")
-
-    plt.tight_layout()
-    if filename is None:
-        filename = f"bin_{label.replace('$','').replace(' ','_')}.png"
-    os.makedirs(output_folder, exist_ok=True)
-    fig.savefig(os.path.join(output_folder, filename), dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-from heapq import heappush, heappushpop
-from scipy.spatial import cKDTree
 
 def compute_knn_distance(points, k=3, boxsize=None):
+    """Distance from each point to its k-th nearest neighbour (periodic if boxsize is given)."""
     if boxsize is not None:
         points = points % boxsize
     tree = cKDTree(points, boxsize=boxsize)
-    dists, _ = tree.query(points, k=k+1)
+    dists, _ = tree.query(points, k=k + 1)        # the first neighbour is the point itself
     return dists[:, k]
-    
-# At the top of data_loader.py, after imports
+
+
+# LaTeX names used in the labels (the labels also become the file names, see
+# make_bin_desc_from_label in scripts/multidark_analysis.py)
 COL_TO_LATEX = {
     'dist_fil': r'd_{\mathrm{fil}}',
     'log_rho_3': r'\mathrm{log_{10}}\rho_3',
 }
 
-def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=None,
-                 nbins=4, fixed_edges=None):
-    """Return (masks, labels, edges) for a single variable."""
-    col_latex = COL_TO_LATEX.get(col, col)  # use LaTeX name if available
-    
-    if mode == "custom_intervals":
-        intervals = custom_intervals
-        if intervals is None:
-            raise ValueError("custom_intervals must be provided")
-        masks, labels = [], []
-        for lo, hi in intervals:
-            mask = (values >= lo) & (values <= hi)
-            masks.append(mask)
-            labels.append(f"${lo:.1f} < {col_latex} \\leq {hi:.1f}$")
-        return masks, labels, None
 
+def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=None):
+    """Masks and labels for one variable.
+      'custom_intervals'     : [(lo, hi), ...] in the variable's units, lo <= x <= hi
+      'percentile_intervals' : [(p_lo, p_hi), ...] percentiles of the variable in this catalogue
+    """
+    col_latex = COL_TO_LATEX.get(col, col)
+    masks, labels = [], []
+    if mode == "custom_intervals":
+        if custom_intervals is None:
+            raise ValueError("custom_intervals must be provided")
+        for lo, hi in custom_intervals:
+            masks.append((values >= lo) & (values <= hi))
+            labels.append(f"${lo:.1f} < {col_latex} \\leq {hi:.1f}$")
     elif mode == "percentile_intervals":
         if percentile_intervals is None:
             raise ValueError("percentile_intervals must be provided")
-        masks, labels = [], []
         for lo_pct, hi_pct in percentile_intervals:
             lo_val = np.percentile(values, lo_pct)
             hi_val = np.percentile(values, hi_pct)
-            mask = (values >= lo_val) & (values <= hi_val)
-            masks.append(mask)
+            masks.append((values >= lo_val) & (values <= hi_val))
             labels.append(f"${col_latex} \\in [{lo_val:.1f}-{hi_val:.1f}]$ Mpc/h")
-        return masks, labels, None
-
-    elif mode == "percentile":
-        percentiles = np.linspace(0, 100, nbins + 1)
-        edges = np.percentile(values, percentiles)
-    elif mode == "equal_width":
-        vmin, vmax = values.min(), values.max()
-        edges = np.linspace(vmin, vmax, nbins + 1)
-    elif mode == "fixed":
-        edges = np.array(fixed_edges)
     else:
         raise ValueError(f"Unknown binning mode: {mode}")
+    return masks, labels
 
-    masks, labels = [], []
-    for i in range(len(edges) - 1):
-        lo, hi = edges[i], edges[i+1]
-        if i == len(edges) - 2:
-            mask = (values >= lo) & (values <= hi)
-        else:
-            mask = (values >= lo) & (values < hi)
-        masks.append(mask)
-        labels.append(f"${lo:.1f} < {col_latex} \\leq {hi:.1f}$")
-    return masks, labels, edges
 
 def split_by_variable(cat, var_config):
     """
-    Split catalog based on one or two variables.
-    
-    Parameters
-    ----------
-    cat : pd.DataFrame
-        Input catalog.
-    var_config : dict or list of dicts
-        If dict: single variable binning.
-        If list of two dicts: 2‑D binning (cartesian product).
-        Each dict must contain:
-            - 'col': column name
-            - 'mode': binning mode (custom_intervals, percentile_intervals, percentile, equal_width, fixed)
-            - optional parameters: custom_intervals, percentile_intervals, nbins, fixed_edges
-    
-    Returns
-    -------
-    bins : list of pd.DataFrame
-        Subsets of the original catalog.
-    labels : list of str
-        Labels for each bin (suitable for plotting).
-    metadata : list of dict
-        For each bin, a dictionary containing bin edges and indices.
+    Subsamples of `cat`.
+    var_config: one dict, or a list of one or two dicts, each with
+        'col' (column name), 'mode' ('custom_intervals' or 'percentile_intervals'),
+        and 'custom_intervals' or 'percentile_intervals'.
+    Two dicts give the cartesian product (e.g. filament x density); empty cells are skipped.
+    Returns (bins, labels): list of DataFrames and their plot labels.
     """
-    # Normalize to list
     if isinstance(var_config, dict):
         var_config = [var_config]
+    if len(var_config) not in (1, 2):
+        raise ValueError("split_by_variable supports one or two variables")
 
-    # Collect per‑variable masks, labels, edges
-    per_var_masks = []
-    per_var_labels = []
-    per_var_edges = []
-    for config in var_config:
-        col = config['col']
-        values = cat[col].values
-        mode = config['mode']
-        custom_intervals = config.get('custom_intervals')
-        percentile_intervals = config.get('percentile_intervals')
-        nbins = config.get('nbins', 4)
-        fixed_edges = config.get('fixed_edges')
-        masks, labels, edges = _get_1d_bins(
-            values, col, mode, custom_intervals, percentile_intervals, nbins, fixed_edges
-        )
-        per_var_masks.append(masks)
-        per_var_labels.append(labels)
-        per_var_edges.append(edges)
+    per_var = [_get_1d_bins(cat[c['col']].values, c['col'], c['mode'],
+                            c.get('custom_intervals'), c.get('percentile_intervals'))
+               for c in var_config]
 
-    # Combine
     if len(var_config) == 1:
-        # 1D
-        bins = [cat.loc[mask].copy() for mask in per_var_masks[0]]
-        labels = per_var_labels[0]
-        edges0 = per_var_edges[0]
-        metadata = []
-        for i, mask in enumerate(per_var_masks[0]):
-            meta = {}
-            if edges0 is not None:
-                meta['edges'] = edges0
-                meta['bin_index'] = i
-            # Also store the interval limits for custom modes
-            # (can be retrieved from labels, but store raw)
-            meta['col'] = var_config[0]['col']
-            metadata.append(meta)
-        return bins, labels, metadata
+        masks, labels = per_var[0]
+        return [cat.loc[m].copy() for m in masks], list(labels)
 
-    elif len(var_config) == 2:
-        # 2D cartesian product
-        bins = []
-        labels = []
-        metadata = []
-        for i, mask1 in enumerate(per_var_masks[0]):
-            for j, mask2 in enumerate(per_var_masks[1]):
-                mask = mask1 & mask2
-                if np.any(mask):
-                    bins.append(cat.loc[mask].copy())
-                    label = f"{per_var_labels[0][i]}, {per_var_labels[1][j]}"
-                    labels.append(label)
-                    meta = {
-                        'col0': var_config[0]['col'],
-                        'col1': var_config[1]['col'],
-                    }
-                    if per_var_edges[0] is not None:
-                        meta['edges0'] = per_var_edges[0]
-                        meta['bin_index0'] = i
-                    if per_var_edges[1] is not None:
-                        meta['edges1'] = per_var_edges[1]
-                        meta['bin_index1'] = j
-                    # Also store interval limits for custom modes
-                    # Could add raw intervals if needed
-                    metadata.append(meta)
-        return bins, labels, metadata
-
-    else:
-        raise ValueError("Only 1 or 2 variables supported for splitting.")
+    (masks0, labels0), (masks1, labels1) = per_var
+    bins, labels = [], []
+    for m0, l0 in zip(masks0, labels0):
+        for m1, l1 in zip(masks1, labels1):
+            mask = m0 & m1
+            if np.any(mask):
+                bins.append(cat.loc[mask].copy())
+                labels.append(f"{l0}, {l1}")
+    return bins, labels

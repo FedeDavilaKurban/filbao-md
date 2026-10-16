@@ -1,8 +1,78 @@
+"""
+Diagnostic plots made by scripts/multidark_analysis.py (not the paper's BAO-fit figures,
+which come from src/bao_fitting.py).
+
+    plot_magnitude_hist            magnitude distribution with the cut
+    plot_bin_data                  x-y map of a sample + histograms of the split variables
+    plot_xi_s_mu                   xi(s, mu) of one sample
+    plot_xi_sigma_pi_from_xi_s_mu  xi(sigma, pi) interpolated from xi(s, mu)
+    plot_monopoles_combined        s^2 xi_0 of all samples, with error bands
+    plot_xi_s_combined             s^2 xi(s) of all samples
+    plot_monopole_to_xi_s_ratio    xi_0 / xi(s) (should be 1 in real space)
+"""
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import SymLogNorm
 from scipy.interpolate import RegularGridInterpolator
 import os
+
+
+def plot_magnitude_hist(cat, mag_max, output_folder, mag_col='mag_abs_r'):
+    """Save magnitude histogram with cut line."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.hist(cat[mag_col], bins=40, color="C00", alpha=0.8)
+    ax.set_yscale("log")
+    ax.axvline(mag_max, color="k", linestyle=":")
+    ax.set_xlabel("Absolute magnitude r")
+    ax.set_ylabel("Count")
+    os.makedirs(output_folder, exist_ok=True)
+    fig.savefig(os.path.join(output_folder, "magnitude_hist.png"), dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_bin_data(gxs, label, output_folder, filename=None, subsample_cols=None):
+    """
+    2D spatial slice (z < 100 h^-1 Mpc) of a sample, plus the histogram of each variable
+    used to split it (subsample_cols, 1 or 2 columns).
+    """
+    if subsample_cols is None:
+        subsample_cols = ["dist_fil"]
+
+    n_hist = len(subsample_cols)
+    fig, axes = plt.subplots(1 + n_hist, 1, figsize=(7, 5*(1+n_hist)))
+    axes0 = axes if isinstance(axes, plt.Axes) else axes[0]
+
+    # 2D spatial plot
+    gxs_plot = gxs[gxs["z"] < 100.]
+    h, xedges, yedges, im = axes0.hist2d(
+        gxs_plot["x"], gxs_plot["y"],
+        bins=100, cmap="Blues",
+        norm=SymLogNorm(linthresh=1, vmin=1, vmax=gxs_plot.shape[0]/500)
+    )
+    fig.colorbar(im, ax=axes0, label="N. of galaxies")
+    axes0.set_xlabel("x [Mpc/h]")
+    axes0.set_ylabel("y [Mpc/h]")
+    axes0.set_title(label + f" (z < 100 Mpc/h, N={len(gxs_plot)} of {len(gxs)})")
+    axes0.set_aspect('equal')
+
+    # 1D histograms for subsample variables
+    for i, col in enumerate(subsample_cols):
+        axes[i+1].hist(gxs[col], bins=40, density=True, color="C03", alpha=0.9)
+        if col == "dist_fil":
+            axes[i+1].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
+        elif col in ["rho_3", "log_rho_3"]:
+            axes[i+1].set_xlabel(r"$\rho_3$ [h$^{-1}$ Mpc]" if col=="rho_3" else r"$\log_{10} \rho_3$")
+        else:
+            axes[i+1].set_xlabel(col)
+        axes[i+1].set_ylabel("PDF")
+
+    plt.tight_layout()
+    if filename is None:
+        filename = f"bin_{label.replace('$','').replace(' ','_')}.png"
+    os.makedirs(output_folder, exist_ok=True)
+    fig.savefig(os.path.join(output_folder, filename), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
 
 def xi_s_mu_to_xi_sigma_pi(xi_s_mu, s_edges, mu_edges, sigma_edges, pi_rebin):
     """Convert ξ(s, μ) to ξ(σ, π) via interpolation."""

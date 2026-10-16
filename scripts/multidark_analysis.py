@@ -1,77 +1,60 @@
+"""
+FilBAO, plan steps 1-2: make the subsamples and measure xi_0(s) and P(k) for each.
+
+    1. Load the MultiDark mock, apply the magnitude cut, compute rho_3 if needed.
+    2. Subsamples: split by `split_vars` (one or two variables), plus random dilutions of the
+       full sample with the same number of galaxies as a bin (number-density controls).
+    3. For the full sample and every subsample: DD(s, mu) -> xi(s, mu) -> monopole xi_0(s),
+       saved to data/processed/monopoles/box/.
+    4. Auto- and cross-power spectra of all of them in one file, data/processed/pk/box/,
+       used by src/bao_fitting.py for the covariance of the fit.
+    5. Optional diagnostic plots (make_plots), in figures/diagnostics/<run name>/.
+
+One run per split: split by dist_fil alone -> Full, Fil, NonFil (+ their dilution controls);
+split by dist_fil and log_rho_3 -> the four filament x density cells.
+
+Run:  python scripts/multidark_analysis.py   (from any folder)
+"""
 import os
+import re
+import sys
 import shutil
 import numpy as np
-import re
-from multidark_data_loader import (load_catalog, select_sample, split_by_variable,
-                         plot_magnitude_hist, plot_bin_data,
-                         compute_knn_distance)
-from multidark_correlation import (compute_xi_s_mu, compute_xi_s, compute_monopole_from_xi_s_mu,
-                         get_save_filename, compute_jackknife_monopole_covariance)
-from multidark_plotter import (plot_xi_s_mu, plot_xi_s_combined, plot_monopoles_combined,
-                     plot_monopole_to_xi_s_ratio, plot_xi_sigma_pi_from_xi_s_mu)
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, 'src'))
+
+from multidark_data_loader import load_catalog, select_sample, split_by_variable, compute_knn_distance
+from multidark_correlation import (get_save_filename, compute_xi_s_mu,
+                                   compute_monopole_from_xi_s_mu, compute_xi_s)
 from multidark_power import measure_spectra, xi_covariance_from_spectra
+from multidark_plotter import (plot_magnitude_hist, plot_bin_data, plot_xi_s_mu,
+                               plot_monopoles_combined, plot_xi_s_combined,
+                               plot_monopole_to_xi_s_ratio)
 
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-L = 1000.0
-mag_max = -21.2
-test_dilute = 1.
-force_recompute_full = False      # set to True to recompute full sample + JK
-force_recompute_bin = False       # set to True to recompute bins + JK
-interpolate_to_xirppi = False
+L = 1000.0                        # box side, h^-1 Mpc
+mag_max = -21.2                   # absolute-magnitude cut
 
-# 2D correlation parameters
+# Correlation function binning
 min_sep_2d = 5.0
 max_sep_2d = 150.0
-bin_size_2d = 5.0                 # 2.5 h^-1 Mpc: same sigma(alpha) as 5, ~15% better sigma(Sigma) for filaments
-pi_rebin = bin_size_2d
+bin_size_2d = 5.0
 
-# --- Jackknife configuration ---
-compute_jk_full = False            # applies only when force_recompute_full is True
-compute_jk_bins = False           # applies only when force_recompute_bin is True
-n_sub_per_side = 4                # number of sub‑divisions per side
-n_workers = 10
-# NOTE: the box jackknife overestimates the monopole errors on BAO scales by 1.5-6x
-# (validation V6 in bao_fitting_gaussian.ipynb).  The BAO fit uses the Gaussian covariance
-# built from the measured power spectra below; the jackknife is kept only as a diagnostic.
+# Pair counts are reused if their file exists; set True to recompute them
+force_recompute_full = False
+force_recompute_bin = False
 
-# --- Power spectra (for the covariance used in the BAO fit) ---
-compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min, ~1-2 GB)
-pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
-
-# --- Error bands in the plots ---
-# 'gaussian'  : Gaussian covariance from the MEASURED auto/cross power spectra
-#               (multidark_power.xi_covariance_from_spectra; validated against the lognormal test V6
-#               of bao_fitting_gaussian.ipynb).  Needs the spectra file (compute_spectra = True once).
-# 'jackknife' : the box jackknife stored in the monopole files (overestimates the errors on
-#               BAO scales by 1.5-6x; kept for comparison only)
-# None        : no error bands
-plot_error_type = 'gaussian'
-
-# --- Random dilutions of the full sample: controls for the number density ---
-# For each bin chosen below, add a random subsample of the FULL sample with exactly the same
-# number of galaxies.  It has Full's clustering and BAO, only a lower nbar, so comparing a bin
-# with its control separates 'this environment' from 'fewer galaxies'.  It is treated as one more
-# bin: pair counts, monopole, spectra (incl. cross-spectra with every other sample) and plots.
-#   'all'  : one control per bin            [0, 1] : only for these bins (index in the split)
-#   []     : none
-# The seed is part of the file name, so changing it never reuses old pair counts.
-dilution_controls = 'all'
-n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...)
-dilution_seed = 20261016
-
-# --- Uniformity check of every sample (analytic randoms assume uniform samples) ---
-check_uniformity = True
-
-# Split configuration
+# Split configuration (one or two variables; two -> all combinations)
 split_vars = [
     {
         'col': 'dist_fil',
         'mode': 'custom_intervals',
         'custom_intervals': [(0, 5), (10, 100)]
     },
-    # Uncomment to also split by rho_3:
+    # Uncomment to also split by rho_3 (the four filament x density cells):
     # {
     #     'col': 'log_rho_3',
     #     'mode': 'percentile_intervals',
@@ -79,103 +62,73 @@ split_vars = [
     # }
 ]
 
-# Output folders
-split_cols = "".join(
-    re.sub(r'[^\w]', '', v['col'])  # remove anything not a letter or number
-    for v in split_vars
-)
+# Random dilutions of the full sample (number-density controls)
+# For each bin chosen below, add a random subsample of the FULL sample with exactly the same
+# number of galaxies: Full's clustering and BAO with a lower nbar.  Comparing a bin with its
+# control separates 'this environment' from 'fewer galaxies'.  Treated as one more bin.
+#   'all' : one control per bin      [0, 1] : only for these bins (index in the split)      [] : none
+# The seed is part of the file name, so changing it never reuses old pair counts.
+dilution_controls = 'all'
+n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...)
+dilution_seed = 20261016
 
-folderName = f"XISMU_box_mag{mag_max:.1f}_{split_cols}"
-if test_dilute < 1.0:
-    folderName += f"_dilute{test_dilute}"
-output_folder = f"../plots/{folderName}/"
-paircounts_dir = "../data/pair_counts/box"
-monopoles_dir = "../data/monopoles/box"
-xis_dir = "../data/xis/box"
-spectra_dir = "../data/pk/box"
+# Power spectra (for the covariance of the BAO fit)
+compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min, ~1-2 GB)
+pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
 
-# Create folders
-if os.path.exists(output_folder):
-    shutil.rmtree(output_folder)
-os.makedirs(output_folder, exist_ok=True)
-os.makedirs(paircounts_dir, exist_ok=True)
-os.makedirs(monopoles_dir, exist_ok=True)
-os.makedirs(xis_dir, exist_ok=True)
-os.makedirs(spectra_dir, exist_ok=True)
+# Diagnostic plots
+make_plots = True                 # magnitude histogram, sample maps, xi(s, mu), xi_0, xi(s), ratio
+plot_errors = True                # error bands on xi_0 and xi(s): Gaussian, from the measured spectra
 
 # ---------------------------
-# HELPER FUNCTIONS
+# PATHS
 # ---------------------------
+RAW_DIR = os.path.join(REPO, 'data', 'raw')
+PROC_DIR = os.path.join(REPO, 'data', 'processed')
+paircounts_dir = os.path.join(PROC_DIR, 'pair_counts', 'box')
+monopoles_dir = os.path.join(PROC_DIR, 'monopoles', 'box')
+xis_dir = os.path.join(PROC_DIR, 'xis', 'box')
+spectra_dir = os.path.join(PROC_DIR, 'pk', 'box')
 
-def make_bin_desc_from_label(label, dilute=None):
+split_cols = "".join(re.sub(r'[^\w]', '', v['col']) for v in split_vars)
+run_name = f"XISMU_box_mag{mag_max:.1f}_{split_cols}"
+plots_dir = os.path.join(REPO, 'figures', 'diagnostics', run_name)
+
+
+# ---------------------------
+# HELPERS
+# ---------------------------
+def make_bin_desc_from_label(label):
     """
-    Convert a bin label into a concise, safe filename string.
+    Bin label -> the <bin_desc> part of the file names.  The fitting notebook uses the same
+    string to find each sample's spectrum in the spectra file.
     """
-    # Replace variable names
     label = label.replace('d_{fil}', 'dfil')
     label = label.replace('log_{10} rho_3', 'log10rho3')
-
-    # Remove LaTeX symbols and spaces
-    label = label.replace('$', '')
-    label = label.replace('\\', '')
-    label = label.replace('{', '')
-    label = label.replace('}', '')
-    label = label.replace('(', '')
-    label = label.replace(')', '')
+    for ch in ('$', '\\', '{', '}', '(', ')'):
+        label = label.replace(ch, '')
     label = label.replace(',', '-')
     label = label.replace(' ', '')
     label = label.replace('<', '-')
-    label = label.replace('<=', '-')
     label = label.replace('>', '-')
     label = label.replace('=', '-')
-
-    # Remove any remaining illegal filename characters
-    label = re.sub(r'[^\w\-_\.]', '_', label)  # only allow letters, numbers, -, _, .
-
-    # Collapse multiple underscores/hyphens
+    label = re.sub(r'[^\w\-_\.]', '_', label)     # only letters, numbers, -, _, .
     label = re.sub(r'_+', '_', label)
     label = re.sub(r'-+', '-', label)
-
-    # Optional: add dilute parameter
-    if dilute is not None and dilute < 1.0:
-        label = f"dilute{dilute}_{label}"
-    else:
-        label = f"{label}"
-
     return label
 
-# ---------------------------
-# MAIN PIPELINE
-# ---------------------------
-def main():
-    # Load and select data
-    cat_full = load_catalog()
-    cat = select_sample(cat_full, mag_max, test_dilute=test_dilute)
-    print(f"Selected {len(cat)} galaxies.")
 
-    # Compute rho_3 if needed
+def make_samples(cat):
+    """[(label, bin_desc, DataFrame, force_recompute)], the full sample first."""
     if split_vars:
-        need_rho3 = any(v['col'] == 'log_rho_3' for v in split_vars)
-        if need_rho3 and 'log_rho_3' not in cat.columns:
-            print("Computing rho_3 (distance to 3rd nearest neighbor)...")
-            coords = cat[['x', 'y', 'z']].values
-            nn_dist = compute_knn_distance(coords, k=3, boxsize=L)
-            rho3 = 3 / ((4 * np.pi * nn_dist**3) / 3)
-            cat['log_rho_3'] = np.log10(rho3)
-            print("Done.")
-
-    # Split into bins
-    if split_vars:
-        bins, labels, bin_metadata = split_by_variable(cat, split_vars)
+        bins, labels = split_by_variable(cat, split_vars)
     else:
-        bins = [cat]
-        labels = ['Full Sample']
-        bin_metadata = [None]
+        bins, labels = [], []
 
-    # Random dilutions of the full sample (number-density controls), appended as extra bins
+    # Random dilutions of the full sample, appended as extra bins
     if dilution_controls:
         targets = range(len(bins)) if dilution_controls == 'all' else list(dilution_controls)
-        new_bins, new_labels, new_meta = [], [], []
+        new_bins, new_labels = [], []
         for t in targets:
             n_target = len(bins[t])
             for r in range(n_dilution_realisations):
@@ -184,279 +137,68 @@ def main():
                 idx = np.sort(rng.choice(len(cat), size=n_target, replace=False))
                 new_bins.append(cat.iloc[idx])
                 new_labels.append(f"Full random N={n_target} r{seed}")
-                new_meta.append({'dilution_of': labels[t], 'dilution_seed': seed,
-                                 'n_target': n_target})
                 print(f"Control: random {n_target} of {len(cat)} Full galaxies "
                       f"(matches '{labels[t]}', seed {seed})")
         bins = list(bins) + new_bins
         labels = list(labels) + new_labels
-        bin_metadata = list(bin_metadata) + new_meta
 
-    print(f"Split into {len(bins)} bins:")
-    for i, (b, lab) in enumerate(zip(bins, labels)):
-        print(f"  Bin {i}: {len(b)} galaxies, {lab}")
+    samples = [('Full Sample', 'full', cat, force_recompute_full)]
+    samples += [(lab, make_bin_desc_from_label(lab), g, force_recompute_bin)
+                for g, lab in zip(bins, labels)]
+    return samples
 
-    # Uniformity check: fractional deviation of the counts in 10 slabs of 100 h^-1 Mpc along
-    # each axis.  Expect |dev| of order the Poisson value printed (plus ~1% from real structure);
-    # much larger values, especially in the slabs at the box faces, mean the selection is not
-    # uniform and the analytic RR is wrong for that sample.
-    if check_uniformity:
-        print("\nSlab counts (N_slab / <N_slab> - 1):")
-        for gxs, lab in [(cat, 'Full Sample')] + list(zip(bins, labels)):
-            for ax in ('x', 'y', 'z'):
-                h, _ = np.histogram(gxs[ax].values, bins=10, range=(0, L))
-                print(f"  {lab:40s} {ax}: {np.round(h / h.mean() - 1, 3)}  "
-                      f"(max |dev| = {np.abs(h / h.mean() - 1).max():.3f}; Poisson rms = {1 / np.sqrt(h.mean()):.3f})")
 
-    # Auto- and cross-power spectra of all samples, read by bao_fitting_gaussian.ipynb
-    # (run_all(..., pk_file=...)) to build the covariance.  Labels = the <bin_desc> used in the
-    # monopole file names ('full' for the full sample), so the notebook matches them automatically.
-    pk_labels = ['full'] + [make_bin_desc_from_label(lab, dilute=test_dilute) for lab in labels]
-    pk_file = os.path.join(spectra_dir, f"pk_{folderName}.npz")
-    if compute_spectra:
-        print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
-        measure_spectra([cat[['x', 'y', 'z']].values] + [g[['x', 'y', 'z']].values for g in bins],
-                        pk_labels, L, ng=pk_ngrid, save=pk_file)
+def measure_monopole(gxs, bin_desc, force):
+    """xi(s, mu) and its monopole for one sample.  The pair counts are reused if saved
+    (unless force); the monopole file is written if missing or if recomputed."""
+    params = dict(mag_max=mag_max, min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d)
+    pc_file = get_save_filename(bin_desc, params, paircounts_dir, filetype='paircounts')
+    mono_file = get_save_filename(bin_desc, params, monopoles_dir, filetype='monopole')
 
-    # Gaussian covariance of the monopoles of all samples (joint: includes the cross-covariances
-    # between samples) from the measured spectra.  Used for the error bands of the plots and saved
-    # for any later use; the BAO fit in the notebook rebuilds it with linear theory at k < 0.08.
-    gauss_err = None
-    if plot_error_type == 'gaussian':
-        if os.path.exists(pk_file):
-            nb_s = int(round((max_sep_2d - min_sep_2d) / bin_size_2d))
-            s_edges_cov = np.linspace(min_sep_2d, max_sep_2d, nb_s + 1)
-            C_xi, lab_cov = xi_covariance_from_spectra(pk_file, s_edges_cov, labels=pk_labels)
-            cov_file = os.path.join(spectra_dir, f"cov_xi0_{folderName}_binsep{bin_size_2d:.1f}.npz")
-            np.savez(cov_file, cov=C_xi, labels=np.array(lab_cov), s_edges=s_edges_cov,
-                     note="joint Gaussian covariance of the xi monopoles, blocks ordered as labels")
-            gauss_err = {l: np.sqrt(np.diag(C_xi)[i*nb_s:(i+1)*nb_s]) for i, l in enumerate(lab_cov)}
-            print(f"Gaussian covariance from measured spectra -> {cov_file}")
-        else:
-            print(f"WARNING: {pk_file} not found (set compute_spectra = True once); "
-                  "falling back to jackknife error bands")
+    xi, s_bins, mu_bins = compute_xi_s_mu(
+        gxs["x"].values, gxs["y"].values, gxs["z"].values,
+        min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
+        paircounts_filename=pc_file, force_recompute=force)
+    s = 0.5 * (s_bins[:-1] + s_bins[1:])
+    xi0 = compute_monopole_from_xi_s_mu(xi)
 
-    # Diagnostic plots
+    if force or not os.path.exists(mono_file):
+        np.savez(mono_file, s=s, xi0=xi0, n_gal=len(gxs))
+        print(f"Saved monopole to {mono_file}")
+    return dict(xi_smu=xi, s_bins=s_bins, mu_bins=mu_bins, s=s, xi0=xi0)
+
+
+# ---------------------------
+# DIAGNOSTIC PLOTS
+# ---------------------------
+def make_diagnostic_plots(cat_full, samples, results, pk_file, pk_labels):
+    """All plots of the run, in plots_dir (emptied first)."""
+    if os.path.exists(plots_dir):
+        shutil.rmtree(plots_dir)
+    os.makedirs(plots_dir, exist_ok=True)
     subsample_cols = [v['col'] for v in split_vars] if split_vars else None
-    plot_magnitude_hist(cat_full, mag_max, output_folder)
-    plot_bin_data(cat, "Full Sample", output_folder, filename="bin_full_data_randoms.png",\
-                   subsample_cols=subsample_cols)
-    for i, (gxs, lab) in enumerate(zip(bins, labels)):
-        bin_desc = make_bin_desc_from_label(lab, dilute=test_dilute)
-        plot_bin_data(gxs, lab, output_folder,
-                    filename=f"bin_{bin_desc}_data_randoms.png",
-                    subsample_cols=subsample_cols)
 
-    # Base parameters for paircounts filenames
-    base_params = {
-        'mag_max': mag_max,
-        'min_sep': min_sep_2d,
-        'max_sep': max_sep_2d,
-        'bin_size': bin_size_2d,
-        'split_vars': split_vars,
-    }
+    # Magnitude cut and the samples (map + histograms of the split variables)
+    plot_magnitude_hist(cat_full, mag_max, plots_dir)
+    plot_bin_data(samples[0][2], "Full Sample", plots_dir, filename="bin_full_data_randoms.png",
+                  subsample_cols=subsample_cols)
+    for lab, desc, gxs, _ in samples[1:]:
+        plot_bin_data(gxs, lab, plots_dir, filename=f"bin_{desc}_data_randoms.png",
+                      subsample_cols=subsample_cols)
 
-    # ----------------------------
-    # 1. Full sample
-    # ----------------------------
-    params_full = base_params.copy()
+    # 1D xi(s), computed directly from DD(s) (checks the monopole: ratio should be 1)
+    params = dict(mag_max=mag_max, min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d)
+    xi_s_list = []
+    for lab, desc, gxs, force in samples:
+        f = get_save_filename(desc, params, xis_dir, filetype='xi_s')
+        xi_s, s_c = compute_xi_s(gxs["x"].values, gxs["y"].values, gxs["z"].values,
+                                 min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
+                                 paircounts_filename=f, force_recompute=force)
+        np.savez(f, s=s_c, xi_s=xi_s)
+        xi_s_list.append((s_c, xi_s))
 
-    # Paircounts filename
-    xismu_paircounts_filename_full = get_save_filename("full", params_full, paircounts_dir, filetype='paircounts')
-    monopole_filename_full = get_save_filename("full", params_full, monopoles_dir, filetype='monopole')
-
-    # Initial default values (will be overwritten)
-    xi_full = None
-    s_centers_full = None
-    xi0_full = None
-    err_full = None
-
-    # Decide whether to recompute or load existing data
-    recompute_now = force_recompute_full
-
-    # Try loading existing monopole file if it exists and we're not forcing recompute
-    if (not recompute_now) and os.path.exists(monopole_filename_full):
-        existing = np.load(monopole_filename_full, allow_pickle=True)
-        s_centers_full = existing['s']
-        xi0_full = existing['xi0']
-        if 'cov' in existing:
-            err_full = np.sqrt(np.diag(existing['cov']))
-            print("Loaded monopole + covariance from", monopole_filename_full)
-        else:
-            err_full = None
-            print("Loaded monopole (no covariance) from", monopole_filename_full)
-
-    if recompute_now:
-        # Compute xi_s_mu (will use paircounts file if available, unless forced)
-        xi_full, s_bins_full, mu_bins_full = compute_xi_s_mu(
-            cat["x"].values, cat["y"].values, cat["z"].values,
-            min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
-            paircounts_filename=xismu_paircounts_filename_full,
-            force_recompute=force_recompute_full   # respect the global recompute flag
-        )
-
-        # Monopole
-        xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins_full)
-        s_centers_full = 0.5 * (s_bins_full[:-1] + s_bins_full[1:])
-
-        # Jackknife only if requested AND recomputing
-        if compute_jk_full:
-            print("\nComputing jackknife covariance for full sample ...")
-            s_jk, xi0_jk, cov_jk = compute_jackknife_monopole_covariance(
-                cat["x"].values, cat["y"].values, cat["z"].values,
-                min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
-                boxsize=L, n_sub_per_side=n_sub_per_side, n_workers=n_workers
-            )
-            np.savez(monopole_filename_full, s=s_jk, xi0=xi0_jk, cov=cov_jk,
-         n_jk=int(n_sub_per_side**3), n_gal=len(cat))
-            err_full = np.sqrt(np.diag(cov_jk))
-            print(f"Saved monopole + covariance to {monopole_filename_full}")
-        else:
-            # No jackknife: save monopole without covariance
-            np.savez(monopole_filename_full, s=s_centers_full, xi0=xi0_full,
-         n_gal=len(cat))
-            err_full = None
-    else:
-        # Not recomputing – but we need the xi_s_mu 2D array for later plots;
-        # load it from the paircounts file (if present) or recompute silently
-        if xi_full is None:
-            xi_full, s_bins_full, mu_bins_full = compute_xi_s_mu(
-                cat["x"].values, cat["y"].values, cat["z"].values,
-                min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
-                paircounts_filename=xismu_paircounts_filename_full,
-                force_recompute=False
-            )
-        s_centers_full = 0.5 * (s_bins_full[:-1] + s_bins_full[1:])
-        xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins_full)
-        # Without force_recompute the monopole used to live only in memory; the notebook needs the file
-        if not os.path.exists(monopole_filename_full):
-            np.savez(monopole_filename_full, s=s_centers_full, xi0=xi0_full, n_gal=len(cat))
-            print(f"Saved monopole to {monopole_filename_full}")
-
-    # Store for combined plots
-    monopoles_list = [(s_centers_full, xi0_full)]
-    labels_list = ['Full Sample']
-    monopoles_errors = [err_full]
-
-    # xi_s output
-    xis_filename_full = get_save_filename("full", params_full, xis_dir, filetype='xi_s')
-    xi_s_full, s_centers_xi_s_full = compute_xi_s(
-        cat["x"].values, cat["y"].values, cat["z"].values,
-        min_sep_2d, max_sep_2d, bin_size_2d,
-        boxsize=L,
-        paircounts_filename=xis_filename_full,
-        force_recompute=force_recompute_full
-    )
-    xi_s_list = [(s_centers_xi_s_full, xi_s_full)]
-    xi_s_errors = [None]
-    np.savez(xis_filename_full, s=s_centers_xi_s_full, xi_s=xi_s_full)
-
-    # ----------------------------
-    # 2. Subsamples
-    # ----------------------------
-    bin_results = []
-    for i, (gxs, lab, meta) in enumerate(zip(bins, labels, bin_metadata)):
-        bin_desc = make_bin_desc_from_label(lab, dilute=test_dilute)
-        print(f"Processing bin: {lab} -> {bin_desc}")
-
-        params_bin = base_params.copy()
-
-        xismu_paircounts_filename_bin = get_save_filename(bin_desc, params_bin, paircounts_dir, filetype='paircounts')
-        monopole_filename_bin = get_save_filename(bin_desc, params_bin, monopoles_dir, filetype='monopole')
-
-        xi_bin = None
-        s_centers_bin = None
-        xi0_bin = None
-        err_bin = None
-
-        # Same logic: check existing file, unless forced recompute
-        recompute_bin_now = force_recompute_bin
-
-        if (not recompute_bin_now) and os.path.exists(monopole_filename_bin):
-            existing = np.load(monopole_filename_bin, allow_pickle=True)
-            s_centers_bin = existing['s']
-            xi0_bin = existing['xi0']
-            if 'cov' in existing:
-                err_bin = np.sqrt(np.diag(existing['cov']))
-                print(f"Loaded existing monopole + covariance for {lab}")
-            else:
-                err_bin = None
-                print(f"Loaded existing monopole (no covariance) for {lab}")
-
-        if recompute_bin_now:
-            # Compute xi_s_mu
-            xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(
-                gxs["x"].values, gxs["y"].values, gxs["z"].values,
-                min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
-                paircounts_filename=xismu_paircounts_filename_bin,
-                force_recompute=force_recompute_bin,
-                dfil_bin_metadata=meta
-            )
-
-            xi0_bin = compute_monopole_from_xi_s_mu(xi_bin, mu_bins_bin)
-            s_centers_bin = 0.5 * (s_bins_bin[:-1] + s_bins_bin[1:])
-
-            # Jackknife if requested
-            if compute_jk_bins:
-                print(f"\nComputing jackknife covariance for {lab} ...")
-                s_jk, xi0_jk, cov_jk = compute_jackknife_monopole_covariance(
-                    gxs["x"].values, gxs["y"].values, gxs["z"].values,
-                    min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
-                    boxsize=L, n_sub_per_side=n_sub_per_side, nthreads=None, n_workers=n_workers
-                )
-                np.savez(monopole_filename_bin, s=s_jk, xi0=xi0_jk, cov=cov_jk,
-            n_jk=int(n_sub_per_side**3), n_gal=len(gxs))
-                err_bin = np.sqrt(np.diag(cov_jk))
-            else:
-                np.savez(monopole_filename_bin, s=s_centers_bin, xi0=xi0_bin,
-         n_gal=len(gxs))
-                err_bin = None
-        else:
-            # Load xi_bin 2D for plots if needed
-            if xi_bin is None:
-                xi_bin, s_bins_bin, mu_bins_bin = compute_xi_s_mu(
-                    gxs["x"].values, gxs["y"].values, gxs["z"].values,
-                    min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
-                    paircounts_filename=xismu_paircounts_filename_bin,
-                    force_recompute=False,
-                    dfil_bin_metadata=meta
-                )
-            else:
-                s_bins_bin = np.linspace(min_sep_2d, max_sep_2d, int((max_sep_2d - min_sep_2d)/bin_size_2d)+1)
-                mu_bins_bin = np.linspace(0, 1, 2*int((max_sep_2d - min_sep_2d)/bin_size_2d)+1)
-
-            # 👇 Compute monopole and centres from the 2D array
-            s_centers_bin = 0.5 * (s_bins_bin[:-1] + s_bins_bin[1:])
-            xi0_bin = compute_monopole_from_xi_s_mu(xi_bin, mu_bins_bin)
-            # Without force_recompute the monopole used to live only in memory; the notebook needs the file
-            if not os.path.exists(monopole_filename_bin):
-                np.savez(monopole_filename_bin, s=s_centers_bin, xi0=xi0_bin, n_gal=len(gxs))
-                print(f"Saved monopole to {monopole_filename_bin}")
-
-        bin_results.append((xi_bin, s_bins_bin, mu_bins_bin, lab, bin_desc))
-
-        monopoles_list.append((s_centers_bin, xi0_bin))
-        labels_list.append(lab)
-        monopoles_errors.append(err_bin)
-
-        # xi_s
-        xi_s_filename_bin = get_save_filename(bin_desc, params_bin, xis_dir, filetype='xi_s')
-        xi_s_bin, s_centers_xi_s_bin = compute_xi_s(
-            gxs["x"].values, gxs["y"].values, gxs["z"].values,
-            min_sep_2d, max_sep_2d, bin_size_2d, boxsize=L,
-            paircounts_filename=xi_s_filename_bin,
-            force_recompute=force_recompute_bin,
-            dfil_bin_metadata=meta
-        )
-        xi_s_list.append((s_centers_xi_s_bin, xi_s_bin))
-        xi_s_errors.append(None)
-        np.savez(xi_s_filename_bin, s=s_centers_xi_s_bin, xi_s=xi_s_bin)
-
-    # ------------------------------------------------------------------
-    # Global color limits for ξ(s, μ) plots
-    # ------------------------------------------------------------------
-    all_xi = [xi_full] + [xi for (xi, _, _, _, _) in bin_results]
-    all_xi_flat = np.concatenate([xi.ravel() for xi in all_xi])
+    # xi(s, mu) of every sample, with a common colour scale
+    all_xi_flat = np.concatenate([r['xi_smu'].ravel() for r in results])
     vmin_global = np.percentile(all_xi_flat, 1)
     vmax_global = np.percentile(all_xi_flat, 99)
     if vmin_global >= 0:
@@ -465,38 +207,84 @@ def main():
         vmax_global = -vmin_global / 2
     contour_levels = np.concatenate(([-0.01, -0.005, -0.001], np.logspace(-3, 0, 10)))
     print(f"Global color limits: vmin={vmin_global:.3f}, vmax={vmax_global:.3f}")
-
-    # Plot ξ(s, μ) for full sample
-    plot_xi_s_mu(xi_full, s_bins_full, mu_bins_full,
-                 title=r"$\xi(s,\mu)$ Full Sample", output_folder=output_folder,
-                 plotname="xi_s_mu_full.png", min_sep=min_sep_2d,
-                 vmin_global=vmin_global, vmax_global=vmax_global,
-                 contour_levels=contour_levels, contour_colors='black')
-
-    for xi, s_bins, mu_bins, lab, bin_desc in bin_results:
-        plot_xi_s_mu(xi, s_bins, mu_bins,
-                     title=rf"$\xi(s,\mu)$ {lab}", output_folder=output_folder,
-                     plotname=f"xi_s_mu_{bin_desc}.png", min_sep=min_sep_2d,
+    for (lab, desc, _, _), r in zip(samples, results):
+        title = r"$\xi(s,\mu)$ Full Sample" if desc == 'full' else rf"$\xi(s,\mu)$ {lab}"
+        plot_xi_s_mu(r['xi_smu'], r['s_bins'], r['mu_bins'], title=title,
+                     output_folder=plots_dir, plotname=f"xi_s_mu_{desc}.png", min_sep=min_sep_2d,
                      vmin_global=vmin_global, vmax_global=vmax_global,
                      contour_levels=contour_levels, contour_colors='black')
 
-    # Error bands: Gaussian from the measured spectra (default), jackknife, or none
-    if plot_error_type == 'gaussian' and gauss_err is not None:
-        monopoles_errors = [gauss_err[l] for l in pk_labels]       # same order: Full, then bins
-        xi_s_errors = monopoles_errors                              # xi(s) = monopole: same errors
-    elif plot_error_type is None:
-        monopoles_errors = None
+    # Error bands: Gaussian covariance of the monopoles from the measured spectra (joint, so it
+    # also contains the cross-covariances between samples; saved for later use)
+    errors = None
+    if plot_errors:
+        if os.path.exists(pk_file):
+            nb_s = int(round((max_sep_2d - min_sep_2d) / bin_size_2d))
+            s_edges = np.linspace(min_sep_2d, max_sep_2d, nb_s + 1)
+            C_xi, lab_cov = xi_covariance_from_spectra(pk_file, s_edges, labels=pk_labels)
+            cov_file = os.path.join(spectra_dir, f"cov_xi0_{run_name}_binsep{bin_size_2d:.1f}.npz")
+            np.savez(cov_file, cov=C_xi, labels=np.array(lab_cov), s_edges=s_edges,
+                     note="joint Gaussian covariance of the xi monopoles, blocks ordered as labels")
+            sig = {l: np.sqrt(np.diag(C_xi)[i*nb_s:(i+1)*nb_s]) for i, l in enumerate(lab_cov)}
+            errors = [sig[l] for l in pk_labels]
+            print(f"Gaussian covariance from measured spectra -> {cov_file}")
+        else:
+            print(f"WARNING: {pk_file} not found (set compute_spectra = True once); no error bands")
 
-    # ------------------------------------------------------------------
-    # Combined plots – pass errors (plotter handles None gracefully)
-    # ------------------------------------------------------------------
-    plot_monopoles_combined(monopoles_list, labels_list, output_folder,
-                            filename='xi0_combined.png', errors=monopoles_errors)
-    plot_xi_s_combined(xi_s_list, labels_list, output_folder,
-                       filename='xi_s_combined.png', errors=xi_s_errors)
-    plot_monopole_to_xi_s_ratio(monopoles_list, xi_s_list, labels_list, output_folder)
+    # Combined xi_0, xi(s) and their ratio
+    monopoles_list = [(r['s'], r['xi0']) for r in results]
+    labels_list = [lab for lab, _, _, _ in samples]
+    plot_monopoles_combined(monopoles_list, labels_list, plots_dir,
+                            filename='xi0_combined.png', errors=errors)
+    plot_xi_s_combined(xi_s_list, labels_list, plots_dir,
+                       filename='xi_s_combined.png', errors=errors)
+    plot_monopole_to_xi_s_ratio(monopoles_list, xi_s_list, labels_list, plots_dir)
+    print(f"Plots in {plots_dir}")
+
+
+# ---------------------------
+# MAIN
+# ---------------------------
+def main():
+    for d in (paircounts_dir, monopoles_dir, spectra_dir) + ((xis_dir,) if make_plots else ()):
+        os.makedirs(d, exist_ok=True)
+
+    # 1. Catalogue
+    cat_full = load_catalog(os.path.join(RAW_DIR, 'to_mock.csv'),
+                            os.path.join(RAW_DIR, 'mock_withfilament.csv'))
+    cat = select_sample(cat_full, mag_max)
+    print(f"Selected {len(cat)} galaxies.")
+    if any(v['col'] == 'log_rho_3' for v in split_vars) and 'log_rho_3' not in cat.columns:
+        print("Computing rho_3 (distance to 3rd nearest neighbor)...")
+        nn_dist = compute_knn_distance(cat[['x', 'y', 'z']].values, k=3, boxsize=L)
+        cat['log_rho_3'] = np.log10(3 / ((4 * np.pi * nn_dist**3) / 3))
+
+    # 2. Subsamples
+    samples = make_samples(cat)
+    print(f"Split into {len(samples) - 1} bins:")
+    for i, (lab, _, g, _) in enumerate(samples[1:]):
+        print(f"  Bin {i}: {len(g)} galaxies, {lab}")
+
+    # 3. Power spectra of all samples (labels = <bin_desc>, as in the monopole file names)
+    pk_labels = [desc for _, desc, _, _ in samples]
+    pk_file = os.path.join(spectra_dir, f"pk_{run_name}.npz")
+    if compute_spectra:
+        print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
+        measure_spectra([g[['x', 'y', 'z']].values for _, _, g, _ in samples],
+                        pk_labels, L, ng=pk_ngrid, save=pk_file)
+
+    # 4. Monopoles
+    results = []
+    for lab, desc, gxs, force in samples:
+        print(f"Processing: {lab} -> {desc}")
+        results.append(measure_monopole(gxs, desc, force))
+
+    # 5. Diagnostic plots
+    if make_plots:
+        make_diagnostic_plots(cat_full, samples, results, pk_file, pk_labels)
 
     print("Analysis complete.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,12 @@
 """
 Auto- and cross-power spectra of galaxy samples in a periodic box.
 
-Used by bao_fitting_gaussian.ipynb (gaussian_cov_pk) and by xi_covariance_from_spectra below to build the Gaussian covariance of the xi monopole
+    measure_spectra             auto/cross P(k) of all samples of a run -> data/processed/pk/
+                                (read by src/bao_fitting.py, gaussian_cov_pk, for the fit)
+    xi_covariance_from_spectra  Gaussian covariance of the xi monopoles from those spectra,
+                                used only for the error bands of the diagnostic plots
+
+Both build the Gaussian covariance of the xi monopole
 from the MEASURED spectra instead of b^2 P_lin + 1/nbar.  That captures any non-Poisson
 (excess) shot noise and small-scale clustering of a selected sample, e.g. galaxies selected
 by distance to DisPerSE filaments, and the cross-spectra give the correlation between
@@ -171,7 +176,7 @@ def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3
 
         Cov[xi_A(i), xi_B(j)] = (2 / V^2) sum_k P_AB(k)^2 <j0>_i(k) <j0>_j(k),     V = L^3
 
-    (same formula as gaussian_cov_pk in bao_fitting_gaussian.ipynb, which uses linear theory
+    (same formula as gaussian_cov_pk in src/bao_fitting.py, which uses linear theory
     instead of a smooth fit at k < 0.08).  Modes: exact lattice count for k < k_exact, smooth
     4 pi k^2 dk / k_f^3 above.  spec: dict from measure_spectra or the saved .npz path.
     Returns (C, labels); C has shape (n_samples * n_bins, n_samples * n_bins), blocks ordered
@@ -180,7 +185,7 @@ def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3
     analytic_shot=True: the constant plateau N_AB (shot noise incl. any excess) is squared and
     summed over ALL modes analytically (sum_k <j0>_i <j0>_j = V delta_ij / V_shell), giving the
     exact 2 N^2 / (V V_shell) diagonal term; the rest is summed to kmax.  Makes the result
-    independent of kmax for narrow bins (same as gaussian_cov_pk in the notebook).
+    independent of kmax for narrow bins (same as gaussian_cov_pk).
     """
     if isinstance(spec, str):
         d = np.load(spec, allow_pickle=True); spec = {key: d[key] for key in d.files}
@@ -208,9 +213,3 @@ def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3
             C[B*nb:(B+1)*nb, A*nb:(A+1)*nb] = blk.T
     return C, labels
 
-
-def xi_errors_from_spectra(spec, s_edges, labels=None, **kw):
-    """{label: sigma(xi_0) per bin} = sqrt of the diagonal of xi_covariance_from_spectra."""
-    C, labels = xi_covariance_from_spectra(spec, s_edges, labels, **kw)
-    nb = len(s_edges) - 1
-    return {l: np.sqrt(np.diag(C)[i*nb:(i+1)*nb]) for i, l in enumerate(labels)}
