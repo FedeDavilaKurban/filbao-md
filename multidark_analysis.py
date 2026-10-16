@@ -28,8 +28,8 @@ bin_size_2d = 2.5                 # 2.5 h^-1 Mpc: same sigma(alpha) as 5, ~15% b
 pi_rebin = bin_size_2d
 
 # --- Jackknife configuration ---
-compute_jk_full = True            # applies only when force_recompute_full is True
-compute_jk_bins = True           # applies only when force_recompute_bin is True
+compute_jk_full = False            # applies only when force_recompute_full is True
+compute_jk_bins = False           # applies only when force_recompute_bin is True
 n_sub_per_side = 4                # number of sub‑divisions per side
 n_workers = 10
 # NOTE: the box jackknife overestimates the monopole errors on BAO scales by 1.5-6x
@@ -69,7 +69,7 @@ split_vars = [
     {
         'col': 'dist_fil',
         'mode': 'custom_intervals',
-        'custom_intervals': [(0, 3), (10, 100)]
+        'custom_intervals': [(0, 5), (10, 100)]
     },
     # Uncomment to also split by rho_3:
     # {
@@ -328,6 +328,10 @@ def main():
             )
         s_centers_full = 0.5 * (s_bins_full[:-1] + s_bins_full[1:])
         xi0_full = compute_monopole_from_xi_s_mu(xi_full, mu_bins_full)
+        # Without force_recompute the monopole used to live only in memory; the notebook needs the file
+        if not os.path.exists(monopole_filename_full):
+            np.savez(monopole_filename_full, s=s_centers_full, xi0=xi0_full, n_gal=len(cat))
+            print(f"Saved monopole to {monopole_filename_full}")
 
     # Store for combined plots
     monopoles_list = [(s_centers_full, xi0_full)]
@@ -424,6 +428,10 @@ def main():
             # 👇 Compute monopole and centres from the 2D array
             s_centers_bin = 0.5 * (s_bins_bin[:-1] + s_bins_bin[1:])
             xi0_bin = compute_monopole_from_xi_s_mu(xi_bin, mu_bins_bin)
+            # Without force_recompute the monopole used to live only in memory; the notebook needs the file
+            if not os.path.exists(monopole_filename_bin):
+                np.savez(monopole_filename_bin, s=s_centers_bin, xi0=xi0_bin, n_gal=len(gxs))
+                print(f"Saved monopole to {monopole_filename_bin}")
 
         bin_results.append((xi_bin, s_bins_bin, mu_bins_bin, lab, bin_desc))
 
