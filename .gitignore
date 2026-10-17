@@ -41,3 +41,5 @@ data/processed/*
 !data/processed/cache/
 # Diagnostic plots written by multidark_analysis.py on every run
 figures/diagnostics/
+# Plots from before the reorganisation (October 2026)
+figures/old/
