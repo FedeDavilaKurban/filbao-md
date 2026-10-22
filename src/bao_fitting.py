@@ -515,10 +515,14 @@ def _summ_1d(x, p):
 
 
 def fit_bao(s, xi, cov_full, T, fit_range=(50, 150), Sigma_prior=('gauss', 'theory', 2.0),
-            Sigma_theory=None, alpha_grid=None, s_edges=None):
+            Sigma_theory=None, alpha_grid=None, s_edges=None, prior_in_dof=True):
     """
     Fit  xi(s) = B^2 [xi_nw(s) + xi_wig(alpha s; Sigma)] + sum_p a_p (s/100)^p  on the
     (alpha, Sigma) grid; B^2 and the a_p are solved exactly at every grid point.
+    dof = N_bins + N_prior - N_params, N_params = 6 (B^2, a0, a1, a2, alpha, Sigma).
+    prior_in_dof=True: a Gaussian Sigma prior adds its term ((Sigma - mu)/sd)^2 to chi2_min,
+    so it counts as one extra data point (N_prior = 1).  A flat prior adds nothing to chi2
+    (N_prior = 0).  prior_in_dof=False: N_prior = 0 always (the old count).
     """
     s_edges = edges_from_centres(s) if s_edges is None else s_edges
     Sigma_theory = Sigma_theory if Sigma_theory is not None else sigma_nl_theory(T.lin)['Sigma_mono']
@@ -556,7 +560,8 @@ def fit_bao(s, xi, cov_full, T, fit_range=(50, 150), Sigma_prior=('gauss', 'theo
 
     n_lin = X.shape[-1]
     n_nl = 1 + (len(Sg) > 1)
-    dof = int(m.sum()) - n_lin - n_nl
+    n_prior = int(prior_in_dof and Sigma_prior[0] == 'gauss')
+    dof = int(m.sum()) + n_prior - n_lin - n_nl
     cmin = float(chi2p[ia, iS])
     return dict(alpha=a_best, lo=a_lo, hi=a_hi, sigma_alpha=0.5 * (a_hi - a_lo), flags=a_fl,
                 alpha_marg=ma, Sigma=S_best, S_lo=S_lo, S_hi=S_hi,
@@ -802,7 +807,7 @@ def plot_alpha_sigma(results, key='fit_free', theory=None):
 # =============================================================================================
 def analyse_sample(monopole_file, spec, label=None, spec_key=None, L=L_BOX, fit_range=(50, 150),
                    alpha_prior_Sigma=('gauss', 'theory', 2.0), free_Sigma=('flat', 0.0, 16.0),
-                   n_mock=300, plot=True, save_plots=False, seed=1, T=None, lin=None):
+                   n_mock=300, plot=True, save_plots=False, seed=1, T=None, lin=None, prior_in_dof=True):
     """
     One sample: bias -> covariance from its measured P(k) -> two fits -> null mocks -> plot.
       fit      : alpha measurement.  Sigma ~ N(theory, 2) (Chen+24 Sec. 7.2), the same prior for
@@ -835,7 +840,7 @@ def analyse_sample(monopole_file, spec, label=None, spec_key=None, L=L_BOX, fit_
     cov = gaussian_cov_pk(s_edges, spec, [spec_index], [bi['b']], T.lin, L)
     cov_g = gaussian_cov_box(s_edges, nbar, bi['b'], T.k, T.P_w, L)     # only for the printout
 
-    kw = dict(T=T, fit_range=fit_range, Sigma_theory=th['Sigma_mono'], s_edges=s_edges)
+    kw = dict(T=T, fit_range=fit_range, Sigma_theory=th['Sigma_mono'], s_edges=s_edges, prior_in_dof=prior_in_dof)
     fit = fit_bao(s, xi, cov, Sigma_prior=alpha_prior_Sigma, **kw)
     fit_free = fit_bao(s, xi, cov, Sigma_prior=free_Sigma, **kw)
     null = run_mocks(fit, n_mock=n_mock, seed=seed + 1, truth='nowiggle')
