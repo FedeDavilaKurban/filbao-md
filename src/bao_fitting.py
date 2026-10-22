@@ -39,7 +39,10 @@ FIG_DIR = os.path.join(REPO, 'figures')
 # =============================================================================================
 # 1. Settings.  CHECK THESE against the simulation you are analysing.
 # =============================================================================================
-COSMO = dict(H0=67.7, ombh2=0.022, omch2=0.12, As=2.1e-9, ns=0.96)
+# MultiDark-Planck (MDPL2): Omega_m = 0.307115, Omega_b = 0.048206, h = 0.6777, n_s = 0.96,
+# sigma_8 = 0.8228, no massive neutrinos.  ombh2 = Omega_b h^2, omch2 = (Omega_m - Omega_b) h^2;
+# As chosen so that CAMB gives sigma_8 = 0.8228 (sets the amplitude of P_lin, hence Sigma_nl theory).
+COSMO = dict(H0=67.77, ombh2=0.022140, omch2=0.118911, mnu=0.0, As=2.1186e-9, ns=0.96)
 Z_SNAP = 0.0          # redshift of the MultiDark snapshot; positions are in REAL space
 L_BOX = 1000.0        # h^-1 Mpc
 
@@ -57,14 +60,19 @@ BROADBAND_POWERS = (0, -1, -2)
 def linear_theory(cosmo=COSMO, z=Z_SNAP, kmax=20.0, cache=None, force=False):
     """CAMB linear matter P(k) to k = 20 h/Mpc plus the derived numbers the pipeline needs:
     r_d (sound horizon at the drag epoch) in h^-1 Mpc, growth rate f, sigma8(z).
-    Read from data/processed/cache if there (CAMB is only needed to recompute)."""
+    Read from data/processed/cache if there AND computed for this cosmology (CAMB is only needed
+    to recompute)."""
     cache = cache or os.path.join(CACHE_DIR, f"camb_linear_z{z:.2f}.npz")
+    tag = repr(sorted(cosmo.items()))                     # the cosmology the cache was made for
     if (not force) and os.path.exists(cache):
         d = np.load(cache)
-        return {key: (d[key] if d[key].ndim else float(d[key])) for key in d.files}
+        if 'cosmo' in d.files and str(d['cosmo']) == tag:
+            return {key: (d[key] if d[key].ndim else float(d[key])) for key in d.files if key != 'cosmo'}
+        print(f"{cache} was computed for another cosmology: recomputing")
     import camb
     pars = camb.CAMBparams()
-    pars.set_cosmology(H0=cosmo['H0'], ombh2=cosmo['ombh2'], omch2=cosmo['omch2'])
+    pars.set_cosmology(H0=cosmo['H0'], ombh2=cosmo['ombh2'], omch2=cosmo['omch2'],
+                       mnu=cosmo.get('mnu', 0.06))        # CAMB's default is mnu = 0.06 eV
     pars.InitPower.set_params(As=cosmo['As'], ns=cosmo['ns'])
     pars.set_matter_power(redshifts=[z], kmax=kmax)
     res = camb.get_results(pars)
@@ -74,7 +82,7 @@ def linear_theory(cosmo=COSMO, z=Z_SNAP, kmax=20.0, cache=None, force=False):
     out = dict(kh=kh, pk=pk[0], rd=res.get_derived_params()['rdrag'] * h,
                f=float(res.get_fsigma8()[0]) / s8, sigma8=s8, z=z)
     os.makedirs(os.path.dirname(cache), exist_ok=True)
-    np.savez(cache, **out)
+    np.savez(cache, cosmo=tag, **out)
     return out
 
 
@@ -100,16 +108,19 @@ def generate_templates(force_recompute=False, save_path=None, z=Z_SNAP, cosmo=CO
     """(k, P_w, P_nw) on a uniform grid 0.001-0.8 h/Mpc (2048 points); P_w = linear P(k),
     P_nw = Wallisch no-wiggle.  The smooth tail beyond k = 0.8 is added by BAOTemplate."""
     save_path = save_path or os.path.join(CACHE_DIR, f'templates_wallisch_z{z:.2f}.npz')
+    tag = repr(sorted(cosmo.items()))
     if not force_recompute and os.path.exists(save_path):
         d = np.load(save_path)
-        return d['k'], d['P_w'], d['P_nw']
+        if 'cosmo' in d.files and str(d['cosmo']) == tag:
+            return d['k'], d['P_w'], d['P_nw']
+        print(f"{save_path} was computed for another cosmology: recomputing")
     lin = lin or linear_theory(cosmo, z)
     k = np.linspace(1e-3, 0.8, 2048)
     P_w = np.exp(np.interp(np.log(k), np.log(lin['kh']), np.log(lin['pk'])))
     kk, Pn = dewiggle_wallisch(lin['kh'], lin['pk'], lin['rd'])
     P_nw = np.interp(k, kk, Pn)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    np.savez(save_path, k=k, P_w=P_w, P_nw=P_nw)
+    np.savez(save_path, k=k, P_w=P_w, P_nw=P_nw, cosmo=tag)
     print(f"Templates (wallisch) computed and saved to {save_path}")
     return k, P_w, P_nw
 

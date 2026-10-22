@@ -52,7 +52,7 @@ split_vars = [
     {
         'col': 'dist_fil',
         'mode': 'custom_intervals',
-        'custom_intervals': [(0, 5), (10, 100)]
+        'custom_intervals': [(0, 3), (10, 100)]
     },
     # Uncomment to also split by rho_3 (the four filament x density cells):
     # {
@@ -107,7 +107,7 @@ def make_bin_desc_from_label(label):
     label = label.replace('log_{10} rho_3', 'log10rho3')
     for ch in ('$', '\\', '{', '}', '(', ')'):
         label = label.replace(ch, '')
-    label = label.replace(',', '-')
+    label = label.replace(',', '_')        # '_' between the two variables ('-' would eat a minus sign)
     label = label.replace(' ', '')
     label = label.replace('<', '-')
     label = label.replace('>', '-')

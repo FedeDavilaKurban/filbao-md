@@ -45,7 +45,7 @@ def compute_knn_distance(points, k=3, boxsize=None):
 # make_bin_desc_from_label in scripts/multidark_analysis.py)
 COL_TO_LATEX = {
     'dist_fil': r'd_{\mathrm{fil}}',
-    'log_rho_3': r'\mathrm{log_{10}}\rho_3',
+    'log_rho_3': r'\log_{10}\rho_3',
 }
 
 
@@ -61,7 +61,7 @@ def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=
             raise ValueError("custom_intervals must be provided")
         for lo, hi in custom_intervals:
             masks.append((values >= lo) & (values <= hi))
-            labels.append(f"${lo:.1f} < {col_latex} \\leq {hi:.1f}$")
+            labels.append(f"${lo:.1f} \\leq {col_latex} \\leq {hi:.1f}$")
     elif mode == "percentile_intervals":
         if percentile_intervals is None:
             raise ValueError("percentile_intervals must be provided")
@@ -69,7 +69,7 @@ def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=
             lo_val = np.percentile(values, lo_pct)
             hi_val = np.percentile(values, hi_pct)
             masks.append((values >= lo_val) & (values <= hi_val))
-            labels.append(f"${col_latex} \\in [{lo_val:.1f}-{hi_val:.1f}]$ Mpc/h")
+            labels.append(f"${lo_val:.2f} \\leq {col_latex} \\leq {hi_val:.2f}$")
     else:
         raise ValueError(f"Unknown binning mode: {mode}")
     return masks, labels
