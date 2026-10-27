@@ -6,8 +6,9 @@ FilBAO, plan steps 1-2: make the subsamples and measure xi_0(s) and P(k) for eac
        full sample with the same number of galaxies as a bin (number-density controls).
     3. For the full sample and every subsample: DD(s, mu) -> xi(s, mu) -> monopole xi_0(s),
        saved to data/processed/monopoles/box/.
-    4. Auto- and cross-power spectra of all of them in one file, data/processed/pk/box/,
-       used by src/bao_fitting.py for the covariance of the fit.
+    4. Auto- and cross-power spectra of all of them in one file, data/processed/pk/box/
+       (folded at high k), used by src/bao_fitting.py for the covariance of the fit; the
+       error bands of the plots use that same covariance.
     5. Optional diagnostic plots (make_plots), in figures/diagnostics/<run name>/.
 
 One run per split: split by dist_fil alone -> Full, Fil, NonFil (+ their dilution controls);
@@ -27,7 +28,8 @@ sys.path.insert(0, os.path.join(REPO, 'src'))
 from multidark_data_loader import load_catalog, select_sample, split_by_variable, compute_knn_distance
 from multidark_correlation import (get_save_filename, compute_xi_s_mu,
                                    compute_monopole_from_xi_s_mu, compute_xi_s)
-from multidark_power import measure_spectra, xi_covariance_from_spectra
+from multidark_power import measure_spectra
+import bao_fitting as bf
 from multidark_plotter import (plot_magnitude_hist, plot_bin_data, plot_xi_s_mu,
                                plot_monopoles_combined, plot_xi_s_combined,
                                plot_monopole_to_xi_s_ratio)
@@ -36,12 +38,12 @@ from multidark_plotter import (plot_magnitude_hist, plot_bin_data, plot_xi_s_mu,
 # CONFIGURATION
 # ---------------------------
 L = 1000.0                        # box side, h^-1 Mpc
-mag_max = -21.2                   # absolute-magnitude cut
+mag_max = -20.8                   # absolute-magnitude cut
 
 # Correlation function binning
 min_sep_2d = 5.0
-max_sep_2d = 150.0
-bin_size_2d = 5.0
+max_sep_2d = 200.0
+bin_size_2d = 2.5
 
 # Pair counts are reused if their file exists; set True to recompute them
 force_recompute_full = False
@@ -73,12 +75,16 @@ n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...
 dilution_seed = 20261016
 
 # Power spectra (for the covariance of the BAO fit)
-compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min, ~1-2 GB)
+compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min per fold level, ~1-2 GB)
 pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
+pk_n_fold = 2                     # foldings of the box (each doubles the k reach at the same memory)
+pk_kuse_frac = 0.6                # each fold level is used up to this fraction of its Nyquist frequency
+                                  # (384, 2, 0.6 -> measured to k = 2.9 h/Mpc)
 
 # Diagnostic plots
 make_plots = True                 # magnitude histogram, sample maps, xi(s, mu), xi_0, xi(s), ratio
-plot_errors = True                # error bands on xi_0 and xi(s): Gaussian, from the measured spectra
+plot_errors = True                # error bands on xi_0 and xi(s): the covariance of the BAO fit
+                                  # (bao_fitting.gaussian_cov_pk), from the measured spectra
 
 # ---------------------------
 # PATHS
@@ -214,20 +220,28 @@ def make_diagnostic_plots(cat_full, samples, results, pk_file, pk_labels):
                      vmin_global=vmin_global, vmax_global=vmax_global,
                      contour_levels=contour_levels, contour_colors='black')
 
-    # Error bands: Gaussian covariance of the monopoles from the measured spectra (joint, so it
-    # also contains the cross-covariances between samples; saved for later use)
+    # Error bands: the same covariance as the BAO fit (bao_fitting.gaussian_cov_pk, with each
+    # sample's bias from estimate_bias_independent, as in analyse_sample), joint over all
+    # samples so it also contains the cross-covariances between samples; saved for later use
     errors = None
     if plot_errors:
         if os.path.exists(pk_file):
-            nb_s = int(round((max_sep_2d - min_sep_2d) / bin_size_2d))
-            s_edges = np.linspace(min_sep_2d, max_sep_2d, nb_s + 1)
-            C_xi, lab_cov = xi_covariance_from_spectra(pk_file, s_edges, labels=pk_labels)
+            s_edges = bf.edges_from_centres(results[0]['s'])
+            nb_s = len(s_edges) - 1
+            lin = bf.linear_theory()
+            T = bf.BAOTemplate(*bf.generate_templates(lin=lin), lin)
+            spec = bf.load_spectra(pk_file)
+            biases = [bf.estimate_bias_independent(r['s'], r['xi0'], s_edges, len(g) / L**3, T, L)['b']
+                      for (_, _, g, _), r in zip(samples, results)]
+            C_xi = bf.gaussian_cov_pk(s_edges, spec, [spec['labels'].index(l) for l in pk_labels],
+                                      biases, lin, L)
             cov_file = os.path.join(spectra_dir, f"cov_xi0_{run_name}_binsep{bin_size_2d:.1f}.npz")
-            np.savez(cov_file, cov=C_xi, labels=np.array(lab_cov), s_edges=s_edges,
-                     note="joint Gaussian covariance of the xi monopoles, blocks ordered as labels")
-            sig = {l: np.sqrt(np.diag(C_xi)[i*nb_s:(i+1)*nb_s]) for i, l in enumerate(lab_cov)}
-            errors = [sig[l] for l in pk_labels]
-            print(f"Gaussian covariance from measured spectra -> {cov_file}")
+            np.savez(cov_file, cov=C_xi, labels=np.array(pk_labels), s_edges=s_edges, biases=biases,
+                     note="joint Gaussian covariance of the xi monopoles (bao_fitting.gaussian_cov_pk), "
+                          "blocks ordered as labels")
+            errors = [np.sqrt(np.diag(C_xi)[i*nb_s:(i+1)*nb_s]) for i in range(len(pk_labels))]
+            print(f"Covariance of the fit (gaussian_cov_pk), b = "
+                  + ", ".join(f"{b:.2f}" for b in biases) + f" -> {cov_file}")
         else:
             print(f"WARNING: {pk_file} not found (set compute_spectra = True once); no error bands")
 
@@ -271,7 +285,7 @@ def main():
     if compute_spectra:
         print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
         measure_spectra([g[['x', 'y', 'z']].values for _, _, g, _ in samples],
-                        pk_labels, L, ng=pk_ngrid, save=pk_file)
+                        pk_labels, L, ng=pk_ngrid, n_fold=pk_n_fold, kuse_frac=pk_kuse_frac, save=pk_file)
 
     # 4. Monopoles
     results = []

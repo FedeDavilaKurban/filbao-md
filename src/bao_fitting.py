@@ -242,9 +242,12 @@ def sigma_nl_theory(lin):
 #   Cov[xi_A(i), xi_B(j)] = (2/V^2) sum_{n != 0} P_AB(k_n)^2 <j0>_i(k_n) <j0>_j(k_n),  V = L^3
 # (Xu+12 eq. 4 and 9, as a sum over the box's discrete modes).  P_AB is each pair of samples'
 # MEASURED auto/cross power (signal + shot noise, incl. any non-Poisson excess), from
-# multidark_power.measure_spectra, with b_A b_B P_lin + N_AB below k = 0.08 so the few noisy
+# multidark_power.measure_spectra (folded at high k, so measured up to ~ the end of the mode
+# sum), with b_A b_B P_lin + N_AB below k_lo (argument of spectrum_for_cov) so the few noisiest
 # low-k modes of the box are not fed back.  The cross terms make filament / non-filament
 # errors correlated, which is what makes the errors on differences right.
+# This is the ONLY covariance recipe: the fits and the error bands of the diagnostic plots of
+# scripts/multidark_analysis.py both call gaussian_cov_pk.
 # The Poisson version (b^2 P_lin + 1/nbar) is kept only for the bias estimate and to print
 # how much larger the measured-P(k) errors are.
 # =============================================================================================
@@ -298,24 +301,31 @@ def gaussian_cov_multi(s_edges, tracers, k, P_lin, L=L_BOX, n_shared=None, kmax=
 
 
 def load_spectra(pk_file):
-    """Spectra saved by multidark_power.measure_spectra (k, P[i, j, k], labels, n_gal, L, ng, kNyq)."""
+    """Spectra saved by multidark_power.measure_spectra (k, P[i, j, k], labels, n_gal, L, ng, kNyq,
+    nmodes, level, n_fold, kuse_frac, kmax).  The spectrum is measured (by folding) up to kmax."""
     d = np.load(pk_file, allow_pickle=True)
     out = {key: d[key] for key in d.files}
+    if 'kmax' not in out:
+        raise ValueError(f"{pk_file} was measured without folding (old format): re-measure the spectra "
+                         f"(compute_spectra = True in scripts/multidark_analysis.py)")
     out['labels'] = [str(x) for x in out['labels']]
-    out['L'] = float(out['L']); out['kNyq'] = float(out['kNyq'])
+    for key in ('L', 'kNyq', 'kmax', 'kuse_frac'):
+        out[key] = float(out[key])
     return out
 
 
-def spectrum_for_cov(spec, iA, iB, bA, bB, lin, kk, k_lo=0.08, k_hi=0.15, n_win=(0.10, 0.20),
-                     kuse_frac=0.6):
+def spectrum_for_cov(spec, iA, iB, bA, bB, lin, kk, k_lo=0.02, k_hi=0.025, n_win=(0.10, 0.20)):
     """
     Total power P_AB(k) (signal + shot noise) for the covariance, at wavenumbers kk, and the
-    constant high-k excess (shot-noise plateau) ex_tail.
-      k >= k_hi           : the MEASURED spectrum
-      k <= k_lo           : b_A b_B P_lin(k) + N_AB, with N_AB = mean of (P_meas - b_A b_B P_lin)
-                            over n_win
-      k_lo < k < k_hi     : linear blend
-      k > kuse_frac*k_Nyq : b_A b_B P_lin(k) + the excess measured near the last usable k
+    constant excess ex_tail used beyond the measured range.
+      k >= k_hi             : the MEASURED spectrum (folded at high k, see multidark_power),
+                              up to its last k, spec['kmax']
+      k <= k_lo             : b_A b_B P_lin(k) + N_AB, with N_AB = mean of (P_meas - b_A b_B P_lin)
+                              over n_win
+      k_lo < k < k_hi       : linear blend
+      k > spec['kmax']      : b_A b_B P_lin(k) + the excess averaged over the last 10% of the
+                              measured k range (only between kmax and the end of the mode sum
+                              of gaussian_cov_pk, and in its analytic sum beyond)
     """
     k, P = spec['k'], spec['P'][iA, iB]
     Pl = lambda x: np.exp(np.interp(np.log(x), np.log(lin['kh']), np.log(lin['pk'])))
@@ -323,10 +333,10 @@ def spectrum_for_cov(spec, iA, iB, bA, bB, lin, kk, k_lo=0.08, k_hi=0.15, n_win=
     w = spec['nmodes'] if 'nmodes' in spec else np.ones_like(k)
     mN = (k >= n_win[0]) & (k <= n_win[1])
     N_AB = np.sum(ex[mN] * w[mN]) / np.sum(w[mN])
-    kuse = kuse_frac * spec['kNyq']
+    kuse = spec['kmax']
     mt = (k > 0.9 * kuse) & (k <= kuse)
     ex_tail = np.sum(ex[mt] * w[mt]) / np.sum(w[mt])
-    meas = np.interp(kk, k[k <= kuse], P[k <= kuse])
+    meas = np.interp(kk, k, P)
     model_lo = bA * bB * Pl(kk) + N_AB
     model_hi = bA * bB * Pl(kk) + ex_tail
     t = np.clip((kk - k_lo) / (k_hi - k_lo), 0, 1)
@@ -371,7 +381,7 @@ def spectrum_key_from_file(monopole_file):
 # 6. Bias from scales below the BAO
 # ---------------------------------------------------------------------------------------------
 # b^2 from xi_gal = b^2 xi_lin on 40-70 h^-1 Mpc (spread over three ranges printed as a
-# warning).  Used ONLY inside the covariance (its k < 0.08 part scales as b^4), so the
+# warning).  Used ONLY inside the covariance (its k < k_lo part scales as b^4), so the
 # covariance is never tuned on the BAO region.
 # =============================================================================================
 def estimate_bias_independent(s, xi, s_edges, nbar, T, L=L_BOX,
@@ -400,7 +410,7 @@ def estimate_bias_independent(s, xi, s_edges, nbar, T, L=L_BOX,
     if bs.min() < 0.3 or bs.max() / bs.min() > 1.15:
         print(f"WARNING bias estimate unstable across ranges: "
               + ", ".join(f"{o['range']}: {o['b']:.3f}" for o in out)
-              + "  -> check the monopole at 30-75 h^-1 Mpc; the covariance scales as b^4 at k < 0.08")
+              + "  -> check the monopole at 30-75 h^-1 Mpc; the covariance scales as b^4 below k_lo of spectrum_for_cov")
     return dict(b=out[primary]['b'], b_min=bs.min(), b_max=bs.max(), detail=out)
 
 

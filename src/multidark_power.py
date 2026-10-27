@@ -1,21 +1,25 @@
 """
 Auto- and cross-power spectra of galaxy samples in a periodic box.
 
-    measure_spectra             auto/cross P(k) of all samples of a run -> data/processed/pk/
-                                (read by src/bao_fitting.py, gaussian_cov_pk, for the fit)
-    xi_covariance_from_spectra  Gaussian covariance of the xi monopoles from those spectra,
-                                used only for the error bands of the diagnostic plots
-
-Both build the Gaussian covariance of the xi monopole
-from the MEASURED spectra instead of b^2 P_lin + 1/nbar.  That captures any non-Poisson
-(excess) shot noise and small-scale clustering of a selected sample, e.g. galaxies selected
-by distance to DisPerSE filaments, and the cross-spectra give the correlation between
-samples of the same box.
+    measure_spectra   auto/cross P(k) of all samples of a run -> data/processed/pk/
+                      (read by src/bao_fitting.py: gaussian_cov_pk builds the covariance of the
+                      xi monopoles from them, for the fits AND for the error bands of the
+                      diagnostic plots of scripts/multidark_analysis.py)
 
 Estimator: CIC assignment, two interlaced grids (Sefusatti et al. 2016) to cancel the
 leading aliasing, deconvolution of the CIC window.  Spectra are NOT shot-noise subtracted:
 the covariance needs the total power  P_AB(k) + N_AB.
-Memory: ~ 3 x ng^3 x 4 bytes per sample (ng = 384 -> ~0.7 GB per sample).
+
+High k by folding (Jenkins et al. 1998): the positions are wrapped into a box of side
+L / 2^f (x -> x mod L/2^f) and measured on the same grid.  A mode k = 2 pi n / (L/2^f), n integer,
+takes the same value e^{i k.x} for every galaxy before and after wrapping, so the folded box
+measures exactly those modes of the full box, and P(k) = 8^f P_folded(k) (same galaxies in
+1/8^f of the volume).  Each folding doubles the reach in k at the same memory; it keeps 1 mode
+in 8^f, harmless at high k where there are 10^5-10^6 modes per bin.  Fold level f is used from
+where level f-1 stops up to kuse_frac x its own Nyquist frequency (grid effects grow near
+Nyquist), so the saved spectrum is measured, never extrapolated, up to its last k.
+Memory: ~ 3 x ng^3 x 4 bytes per sample (ng = 384 -> ~0.7 GB per sample), the same for every
+fold level (levels are measured one after the other).
 """
 import numpy as np
 from scipy import fft
@@ -62,16 +66,11 @@ def density_fourier(pos, L, ng=384, interlace=True):
     return (D / W).astype(np.complex64)
 
 
-def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, kmax_frac=1.0):
-    """
-    pos_list : list of (N_i, 3) arrays in [0, L) (h^-1 Mpc); labels: matching names
-    Returns dict(k, P[i, j, k], labels, n_gal, L, ng, kNyq, nmodes); P includes shot noise.
-    Bins: width k_f = 2 pi / L from k_f to kmax_frac * k_Nyquist.
-    """
+def _spectra_in_box(pos_list, L, ng, interlace, edges):
+    """Auto/cross P(k) of all samples in a periodic box of side L, in the k bins `edges`.
+    Returns (k mean, P[i, j, bin], number of modes) for the bins that contain modes."""
     kx, ky, kz = _kgrid(L, ng)
     K = np.sqrt(kx**2 + ky**2 + kz**2)
-    kf = 2 * np.pi / L; kN = np.pi * ng / L
-    edges = np.arange(0.5 * kf, kmax_frac * kN + kf, kf)
     ib = np.digitize(K, edges) - 1
     w = np.full(K.shape, 2.0, np.float32); w[..., 0] = 1.0
     if ng % 2 == 0:
@@ -81,6 +80,7 @@ def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, kmax
     ibf, wf = ib[ok], w[ok]
     nmodes = np.bincount(ibf, weights=wf, minlength=nb)
     kmean = np.bincount(ibf, weights=(K[ok] * wf), minlength=nb) / np.maximum(nmodes, 1)
+    del K, ib, w
     Ds = [density_fourier(p, L, ng, interlace) for p in pos_list]
     S = len(Ds)
     P = np.zeros((S, S, nb))
@@ -89,127 +89,41 @@ def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, kmax
             cross = (Ds[a] * np.conj(Ds[b])).real[ok] * L**3 / ng**6
             P[a, b] = P[b, a] = np.bincount(ibf, weights=cross * wf, minlength=nb) / np.maximum(nmodes, 1)
     good = nmodes > 0
-    out = dict(k=kmean[good], P=P[:, :, good], labels=np.array(labels), n_gal=np.array([len(p) for p in pos_list]),
-               L=float(L), ng=int(ng), kNyq=kN, nmodes=nmodes[good])
+    return kmean[good], P[:, :, good], nmodes[good]
+
+
+def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, n_fold=2, kuse_frac=0.6):
+    """
+    pos_list : list of (N_i, 3) arrays in [0, L) (h^-1 Mpc); labels: matching names
+    n_fold   : number of foldings (0 = no folding).  Level f measures the box folded to L / 2^f.
+    kuse_frac: each level is trusted up to kuse_frac x its own Nyquist frequency pi ng 2^f / L;
+               the next level takes over from there.  With ng = 384, L = 1000, n_fold = 2:
+               level 0 to 0.72, level 1 to 1.45, level 2 to 2.9 h/Mpc.
+    Bins: width 2 pi 2^f / L (the fundamental frequency of the box of that level).
+    Returns dict(k, P[i, j, k], labels, n_gal, L, ng, kNyq, nmodes, level, n_fold, kuse_frac, kmax);
+    P includes shot noise.  kNyq = Nyquist frequency of the unfolded grid; level = fold level of
+    each k bin; kmax = upper edge of the last bin (the spectrum is measured up to there).
+    """
+    kN = np.pi * ng / L
+    ks, Ps, nms, lev = [], [], [], []
+    k_start = 0.5 * 2 * np.pi / L                           # level 0: bins centred on n k_f
+    for f in range(n_fold + 1):
+        Lf = L / 2**f
+        kf = 2 * np.pi / Lf
+        k_top = kuse_frac * np.pi * ng / Lf
+        edges = k_start + kf * np.arange(int(np.floor((k_top - k_start) / kf)) + 1)
+        pos_f = [np.mod(np.asarray(p, np.float64), Lf) for p in pos_list]
+        k, P, nm = _spectra_in_box(pos_f, Lf, ng, interlace, edges)
+        ks.append(k); Ps.append(8.0**f * P); nms.append(nm); lev.append(np.full(len(k), f))
+        print(f"  fold level {f}: box {Lf:.0f} h^-1 Mpc, k = {edges[0]:.3f}-{edges[-1]:.3f} h/Mpc, {len(k)} bins")
+        k_start = edges[-1]
+    out = dict(k=np.concatenate(ks), P=np.concatenate(Ps, axis=2), labels=np.array(labels),
+               n_gal=np.array([len(p) for p in pos_list]), L=float(L), ng=int(ng), kNyq=kN,
+               nmodes=np.concatenate(nms), level=np.concatenate(lev), n_fold=int(n_fold),
+               kuse_frac=float(kuse_frac), kmax=float(k_start))
     if save:
         import os
         os.makedirs(os.path.dirname(save) or '.', exist_ok=True)
         np.savez(save, **out)
         print(f"Saved spectra of {list(labels)} -> {save}")
     return out
-
-
-# ---------------------------------------------------------------------------------------------
-# Standalone Gaussian covariance of the xi monopole from the measured spectra
-# (no CAMB, no fitting: usable directly in multidark_analysis.py for the error bands of plots)
-# ---------------------------------------------------------------------------------------------
-
-def shell_avg_j0(k, s_lo, s_hi):
-    """Volume average of j0(k s) over each shell s_lo < s < s_hi (what DD/RR - 1 measures in a
-    bin), using  int s^2 j0(ks) ds = [sin(ks) - ks cos(ks)] / k^3.  Shape (n_bins, n_k)."""
-    k = np.asarray(k, float)[None, :]
-    a = np.asarray(s_lo, float)[:, None]; b = np.asarray(s_hi, float)[:, None]
-    F = lambda s: (np.sin(k * s) - k * s * np.cos(k * s)) / k**3
-    return 3.0 * (F(b) - F(a)) / (b**3 - a**3)
-
-
-def _lattice_modes(L, kmax):
-    """Exact number of Fourier modes n != 0 of the periodic box at each |k| <= kmax."""
-    kf = 2 * np.pi / L
-    nmax = int(np.floor(kmax / kf))
-    n = np.arange(-nmax, nmax + 1)
-    n2 = (n[:, None, None]**2 + n[None, :, None]**2 + n[None, None, :]**2).ravel()
-    cnt = np.bincount(n2[n2 <= nmax**2], minlength=nmax**2 + 1).astype(float)
-    cnt[0] = 0.0
-    m = np.nonzero(cnt)[0]
-    return kf * np.sqrt(m), cnt[m]
-
-
-def power_for_cov(spec, a, b, k, k_smooth=(0.08, 0.15), kfit_max=0.25, deg=4, kuse_frac=0.6,
-                  return_tail=False):
-    """
-    Total power P_ab(k) (clustering + shot noise, as measured) to put in the covariance.
-      k >= k_smooth[1]       : the measured spectrum (millions of modes: precise)
-      k <= k_smooth[0]       : a smooth fit to the measured spectrum (polynomial in log k over
-                               k <= kfit_max, weighted by the Gaussian error of each shell).
-                               The few low-k modes are noisy (e.g. +-25 % at k = 0.01), and
-                               plugging that noise into the covariance would make it noisy too.
-      in between             : linear blend
-      k > kuse_frac * k_Nyq  : extrapolated with N + A k^-n fitted on [0.5, 1] x that k (grid
-                               effects grow near Nyquist); contributes little on > 5 h^-1 Mpc
-    """
-    km, P, nm = spec['k'], spec['P'][a, b], spec['nmodes']
-    Paa, Pbb = spec['P'][a, a], spec['P'][b, b]
-    sig = np.sqrt((Paa * Pbb + P**2) / np.maximum(nm, 1))          # Gaussian error of each shell
-    mf = km <= kfit_max
-    coef = np.polyfit(np.log(km[mf]), P[mf], deg, w=1.0 / sig[mf])
-    smooth = np.polyval(coef, np.log(np.maximum(k, km[0])))
-    kuse = kuse_frac * float(spec['kNyq'])
-    ok = km <= kuse
-    meas = np.interp(k, km[ok], P[ok])
-    # beyond kuse: P = N + A k^-n fitted on [0.5, 1] kuse (a white plateau plus a decaying
-    # clustering term), so neither the plateau nor the clustering is frozen at its kuse value
-    mt = (km >= 0.5 * kuse) & ok
-    tail = np.full_like(np.asarray(k, float), P[ok][-1])
-    N_tail = float(P[ok][-1])                                        # constant plateau
-    try:
-        from scipy.optimize import curve_fit
-        f = lambda x, N, A, n: N + A * x**(-n)
-        p0 = (P[mt][-1] * 0.8, P[mt][-1] * 0.2 * kuse**1.5, 1.5)
-        popt, _ = curve_fit(f, km[mt], P[mt], p0=p0, sigma=sig[mt], maxfev=20000,
-                            bounds=([-np.inf, 0.0, 0.0], [np.inf, np.inf, 4.0]))
-        tail = f(np.maximum(k, kuse), *popt)
-        N_tail = float(popt[0])
-    except Exception:
-        pass
-    t = np.clip((k - k_smooth[0]) / (k_smooth[1] - k_smooth[0]), 0, 1)
-    out = (1 - t) * smooth + t * meas
-    out = np.where(k > kuse, tail, out)
-    return (out, N_tail) if return_tail else out
-
-
-def xi_covariance_from_spectra(spec, s_edges, labels=None, kmax=3.0, k_exact=0.3, dk=5e-4,
-                               analytic_shot=True, **kw):
-    """
-    Joint Gaussian covariance of the bin-averaged xi monopoles of the samples `labels`
-    (default: all) in a periodic box, from their MEASURED auto- and cross-spectra:
-
-        Cov[xi_A(i), xi_B(j)] = (2 / V^2) sum_k P_AB(k)^2 <j0>_i(k) <j0>_j(k),     V = L^3
-
-    (same formula as gaussian_cov_pk in src/bao_fitting.py, which uses linear theory
-    instead of a smooth fit at k < 0.08).  Modes: exact lattice count for k < k_exact, smooth
-    4 pi k^2 dk / k_f^3 above.  spec: dict from measure_spectra or the saved .npz path.
-    Returns (C, labels); C has shape (n_samples * n_bins, n_samples * n_bins), blocks ordered
-    as `labels`.
-
-    analytic_shot=True: the constant plateau N_AB (shot noise incl. any excess) is squared and
-    summed over ALL modes analytically (sum_k <j0>_i <j0>_j = V delta_ij / V_shell), giving the
-    exact 2 N^2 / (V V_shell) diagonal term; the rest is summed to kmax.  Makes the result
-    independent of kmax for narrow bins (same as gaussian_cov_pk).
-    """
-    if isinstance(spec, str):
-        d = np.load(spec, allow_pickle=True); spec = {key: d[key] for key in d.files}
-    all_labels = [str(x) for x in spec['labels']]
-    labels = all_labels if labels is None else list(labels)
-    idx = [all_labels.index(l) for l in labels]
-    L = float(spec['L']); V = L**3; kf = 2 * np.pi / L
-    k1, c1 = _lattice_modes(L, k_exact)
-    k2 = np.arange(k1[-1] + 0.5 * dk, kmax, dk)
-    kk = np.concatenate([k1, k2]); cnt = np.concatenate([c1, 4 * np.pi * k2**2 * dk / kf**3])
-    s_edges = np.asarray(s_edges, float)
-    J = shell_avg_j0(kk, s_edges[:-1], s_edges[1:])
-    nb = J.shape[0]; T = len(idx)
-    V_shell = 4.0 * np.pi / 3.0 * (s_edges[1:]**3 - s_edges[:-1]**3)
-    C = np.zeros((T * nb, T * nb))
-    for A in range(T):
-        for B in range(A, T):
-            PAB, N_AB = power_for_cov(spec, idx[A], idx[B], kk, return_tail=True, **kw)
-            if analytic_shot:
-                blk = (2.0 / V**2) * (J * (cnt * (PAB**2 - N_AB**2))) @ J.T
-                blk = blk + np.diag(2.0 * N_AB**2 / (V * V_shell))
-            else:
-                blk = (2.0 / V**2) * (J * (cnt * PAB**2)) @ J.T
-            C[A*nb:(A+1)*nb, B*nb:(B+1)*nb] = blk
-            C[B*nb:(B+1)*nb, A*nb:(A+1)*nb] = blk.T
-    return C, labels
-
