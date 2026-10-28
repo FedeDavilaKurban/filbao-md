@@ -38,7 +38,7 @@ from multidark_plotter import (plot_magnitude_hist, plot_bin_data, plot_xi_s_mu,
 # CONFIGURATION
 # ---------------------------
 L = 1000.0                        # box side, h^-1 Mpc
-mag_max = -20.8                   # absolute-magnitude cut
+mag_max = -21.2                   # absolute-magnitude cut
 
 # Correlation function binning
 min_sep_2d = 5.0
