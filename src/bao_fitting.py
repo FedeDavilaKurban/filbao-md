@@ -314,7 +314,7 @@ def load_spectra(pk_file):
     return out
 
 
-def spectrum_for_cov(spec, iA, iB, bA, bB, lin, kk, k_lo=0.02, k_hi=0.025, n_win=(0.10, 0.20)):
+def spectrum_for_cov(spec, iA, iB, bA, bB, lin, kk, k_lo=0.0, k_hi=1e-3, n_win=(0.10, 0.20)):
     """
     Total power P_AB(k) (signal + shot noise) for the covariance, at wavenumbers kk, and the
     constant excess ex_tail used beyond the measured range.

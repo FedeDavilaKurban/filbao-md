@@ -92,14 +92,20 @@ def _spectra_in_box(pos_list, L, ng, interlace, edges):
     return kmean[good], P[:, :, good], nmodes[good]
 
 
-def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, n_fold=2, kuse_frac=0.6):
+def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, n_fold=2, kuse_frac=0.6,
+                    k_shells=0.03):
     """
     pos_list : list of (N_i, 3) arrays in [0, L) (h^-1 Mpc); labels: matching names
     n_fold   : number of foldings (0 = no folding).  Level f measures the box folded to L / 2^f.
     kuse_frac: each level is trusted up to kuse_frac x its own Nyquist frequency pi ng 2^f / L;
                the next level takes over from there.  With ng = 384, L = 1000, n_fold = 2:
                level 0 to 0.72, level 1 to 1.45, level 2 to 2.9 h/Mpc.
-    Bins: width 2 pi 2^f / L (the fundamental frequency of the box of that level).
+    k_shells : below this k (level 0), one bin per shell of modes with the same |n|^2, k = 2 pi |n| / L,
+               so each bin is centred exactly on the k of its modes and the covariance
+               (bao_fitting.gaussian_cov_pk, which sums over these same modes) uses each shell's own
+               measured power, with no interpolation between shells.  0 = off.  The regular bins
+               take over at the first regular edge above k_shells (0.0346 h/Mpc for the default).
+    Bins: width 2 pi 2^f / L (the fundamental frequency of the box of that level), above k_shells.
     Returns dict(k, P[i, j, k], labels, n_gal, L, ng, kNyq, nmodes, level, n_fold, kuse_frac, kmax);
     P includes shot noise.  kNyq = Nyquist frequency of the unfolded grid; level = fold level of
     each k bin; kmax = upper edge of the last bin (the spectrum is measured up to there).
@@ -112,6 +118,12 @@ def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, n_fo
         kf = 2 * np.pi / Lf
         k_top = kuse_frac * np.pi * ng / Lf
         edges = k_start + kf * np.arange(int(np.floor((k_top - k_start) / kf)) + 1)
+        if f == 0 and k_shells > 0:
+            # one bin per shell |n|^2 = m below k_shells (bin k = the shell's exact k), joined to the
+            # regular bins at the regular edge (j + 1/2) k_f, which lies between shells j^2+j and j^2+j+1
+            j = int(np.ceil(k_shells / kf - 0.5))
+            shell_edges = kf * np.sqrt(np.arange(j * j + j) + 0.5)
+            edges = np.concatenate([shell_edges, edges[edges >= (j + 0.5) * kf - 1e-12 * kf]])
         pos_f = [np.mod(np.asarray(p, np.float64), Lf) for p in pos_list]
         k, P, nm = _spectra_in_box(pos_f, Lf, ng, interlace, edges)
         ks.append(k); Ps.append(8.0**f * P); nms.append(nm); lev.append(np.full(len(k), f))
@@ -120,7 +132,7 @@ def measure_spectra(pos_list, labels, L, ng=384, interlace=True, save=None, n_fo
     out = dict(k=np.concatenate(ks), P=np.concatenate(Ps, axis=2), labels=np.array(labels),
                n_gal=np.array([len(p) for p in pos_list]), L=float(L), ng=int(ng), kNyq=kN,
                nmodes=np.concatenate(nms), level=np.concatenate(lev), n_fold=int(n_fold),
-               kuse_frac=float(kuse_frac), kmax=float(k_start))
+               kuse_frac=float(kuse_frac), kmax=float(k_start), k_shells=float(k_shells))
     if save:
         import os
         os.makedirs(os.path.dirname(save) or '.', exist_ok=True)
