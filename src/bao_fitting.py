@@ -385,10 +385,13 @@ def spectrum_key_from_file(monopole_file):
 # covariance is never tuned on the BAO region.
 # =============================================================================================
 def estimate_bias_independent(s, xi, s_edges, nbar, T, L=L_BOX,
-                              ranges=((30, 60), (40, 70), (35, 75)), primary=1, n_iter=4):
+                              ranges=((30, 60), (40, 70), (35, 75)), primary=1, n_iter=4,
+                              b_floor=0.3, spread_max=1.15):
     """Weighted least squares with the DIAGONAL of the Poisson-Gaussian covariance (robust
     against the bin-to-bin structure of the data; the full-GLS version returned b -> 0 with
-    2.5 h^-1 Mpc bins).  b is relative to the template amplitude."""
+    2.5 h^-1 Mpc bins).  b is relative to the template amplitude.
+    b_ok = False (and a WARNING) if the bias is undetermined: the fits over `ranges` disagree
+    (largest / smallest b > spread_max) or the smallest is below b_floor."""
     k, P_w = T.k, T.P_w
     xi_lin = T.xi(0.0, edges=s_edges)            # bin-averaged, undamped
     out = []
@@ -407,11 +410,12 @@ def estimate_bias_independent(s, xi, s_edges, nbar, T, L=L_BOX,
         out.append(dict(range=(lo, hi), b=b, b2=b2, sigma_b=0.5 * sig_b2 / b, chi2=chi2,
                         dof=int(m.sum()) - 1))
     bs = np.array([o['b'] for o in out])
-    if bs.min() < 0.3 or bs.max() / bs.min() > 1.15:
+    b_ok = not (bs.min() < b_floor or bs.max() / bs.min() > spread_max)
+    if not b_ok:
         print(f"WARNING bias estimate unstable across ranges: "
               + ", ".join(f"{o['range']}: {o['b']:.3f}" for o in out)
               + "  -> check the monopole at 30-75 h^-1 Mpc; the covariance scales as b^4 below k_lo of spectrum_for_cov")
-    return dict(b=out[primary]['b'], b_min=bs.min(), b_max=bs.max(), detail=out)
+    return dict(b=out[primary]['b'], b_min=bs.min(), b_max=bs.max(), b_ok=b_ok, detail=out)
 
 
 # =============================================================================================

@@ -60,8 +60,12 @@ def plot_bin_data(gxs, label, output_folder, filename=None, subsample_cols=None)
         axes[i+1].hist(gxs[col], bins=40, density=True, color="C03", alpha=0.9)
         if col == "dist_fil":
             axes[i+1].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
-        elif col in ["rho_3", "log_rho_3"]:
-            axes[i+1].set_xlabel(r"$\rho_3$ [h$^{-1}$ Mpc]" if col=="rho_3" else r"$\log_{10} \rho_3$")
+        elif col.startswith("log_rho_"):
+            k = col[len("log_rho_"):]
+            axes[i+1].set_xlabel(rf"$\log_{{10}} \rho_{{{k}}}$")
+        elif col.startswith("rho_"):
+            k = col[len("rho_"):]
+            axes[i+1].set_xlabel(rf"$\rho_{{{k}}}$")
         else:
             axes[i+1].set_xlabel(col)
         axes[i+1].set_ylabel("PDF")

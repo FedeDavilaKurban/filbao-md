@@ -1,7 +1,7 @@
 """
 FilBAO, plan steps 1-2: make the subsamples and measure xi_0(s) and P(k) for each.
 
-    1. Load the MultiDark mock, apply the magnitude cut, compute rho_3 if needed.
+    1. Load the MultiDark mock, apply the magnitude cut, compute the local density rho_k if needed.
     2. Subsamples: split by `split_vars` (one or two variables), plus random dilutions of the
        full sample with the same number of galaxies as a bin (number-density controls).
     3. For the full sample and every subsample: DD(s, mu) -> xi(s, mu) -> monopole xi_0(s),
@@ -11,8 +11,9 @@ FilBAO, plan steps 1-2: make the subsamples and measure xi_0(s) and P(k) for eac
        error bands of the plots use that same covariance.
     5. Optional diagnostic plots (make_plots), in figures/diagnostics/<run name>/.
 
-One run per split: split by dist_fil alone -> Full, Fil, NonFil (+ their dilution controls);
-split by dist_fil and log_rho_3 -> the four filament x density cells.
+One run per split.  Current plan: two 1D runs, quartiles Q1-Q4 of dist_fil, then quartiles of
+log_rho_k (k = knn_k), each with Full and one random dilution of Full to N/4.  The run name ends in
+the split (e.g. ..._dist_fil_Q4), so runs never overwrite each other's files.
 
 Run:  python scripts/multidark_analysis.py   (from any folder)
 """
@@ -25,7 +26,8 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, 'src'))
 
-from multidark_data_loader import load_catalog, select_sample, split_by_variable, compute_knn_distance
+from multidark_data_loader import (load_catalog, select_sample, split_by_variable, compute_knn_distance,
+                                   quantile_edges)
 from multidark_correlation import (get_save_filename, compute_xi_s_mu,
                                    compute_monopole_from_xi_s_mu, compute_xi_s)
 from multidark_power import measure_spectra
@@ -38,31 +40,36 @@ from multidark_plotter import (plot_magnitude_hist, plot_bin_data, plot_xi_s_mu,
 # CONFIGURATION
 # ---------------------------
 L = 1000.0                        # box side, h^-1 Mpc
-mag_max = -21.2                   # absolute-magnitude cut
+mag_max = -20.8                   # absolute-magnitude cut
 
 # Correlation function binning
 min_sep_2d = 5.0
 max_sep_2d = 200.0
-bin_size_2d = 2.5
+bin_size_2d = 5.0
 
 # Pair counts are reused if their file exists; set True to recompute them
 force_recompute_full = False
 force_recompute_bin = False
 
+# Local density: rho_k = k / (4/3 pi r_k^3), r_k = distance to the k-th nearest neighbour, in the
+# column log_rho_<k> = log10 rho_k (computed below if a split uses it).  k = 10 as in the Baugh paper
+# we want to compare with.  Quantile splits depend only on k (not on the normalisation of rho_k).
+knn_k = 10
+rho_col = f'log_rho_{knn_k}'
+
 # Split configuration (one or two variables; two -> all combinations)
+#   'quantiles' : n_quantiles equal-number bins Q1 (smallest values) ... Qn
+#   for the density run, replace 'dist_fil' by rho_col
 split_vars = [
     {
         'col': 'dist_fil',
-        'mode': 'custom_intervals',
-        'custom_intervals': [(0, 3), (10, 100)]
+        'mode': 'quantiles',
+        'n_quantiles': 4
     },
-    # Uncomment to also split by rho_3 (the four filament x density cells):
-    # {
-    #     'col': 'log_rho_3',
-    #     'mode': 'percentile_intervals',
-    #     'percentile_intervals': [(0, 84), (84, 100)]
-    # }
 ]
+# Earlier runs, for reference:
+#   Fil / NonFil:            {'col': 'dist_fil', 'mode': 'custom_intervals', 'custom_intervals': [(0, 3), (10, 100)]}
+#   x dense / underdense:    add {'col': rho_col, 'mode': 'percentile_intervals', 'percentile_intervals': [(0, 84), (84, 100)]}
 
 # Random dilutions of the full sample (number-density controls)
 # For each bin chosen below, add a random subsample of the FULL sample with exactly the same
@@ -70,7 +77,8 @@ split_vars = [
 # control separates 'this environment' from 'fewer galaxies'.  Treated as one more bin.
 #   'all' : one control per bin      [0, 1] : only for these bins (index in the split)      [] : none
 # The seed is part of the file name, so changing it never reuses old pair counts.
-dilution_controls = 'all'
+# Quantile bins all have N/n_quantiles galaxies (to within one), so one control serves them all: [0].
+dilution_controls = [0]
 n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...)
 dilution_seed = 20261016
 
@@ -96,7 +104,13 @@ monopoles_dir = os.path.join(PROC_DIR, 'monopoles', 'box')
 xis_dir = os.path.join(PROC_DIR, 'xis', 'box')
 spectra_dir = os.path.join(PROC_DIR, 'pk', 'box')
 
-split_cols = "".join(re.sub(r'[^\w]', '', v['col']) for v in split_vars)
+def split_tag(v):
+    """Part of the run name for one split variable: its column, plus _Q<n> for a quantile split."""
+    tag = re.sub(r'[^\w]', '', v['col'])
+    return tag + (f"_Q{v['n_quantiles']}" if v['mode'] == 'quantiles' else '')
+
+
+split_cols = "".join(split_tag(v) for v in split_vars)      # e.g. dist_fil_Q4, log_rho_10_Q4
 run_name = f"XISMU_box_mag{mag_max:.1f}_{split_cols}"
 plots_dir = os.path.join(REPO, 'figures', 'diagnostics', run_name)
 
@@ -130,6 +144,7 @@ def make_samples(cat):
         bins, labels = split_by_variable(cat, split_vars)
     else:
         bins, labels = [], []
+    n_split = len(bins)                  # bins of the split; the dilutions are appended after them
 
     # Random dilutions of the full sample, appended as extra bins
     if dilution_controls:
@@ -148,9 +163,17 @@ def make_samples(cat):
         bins = list(bins) + new_bins
         labels = list(labels) + new_labels
 
+    # <bin_desc>: from the label; for a 1D quantile split, <split tag without _Q<n>>_Q<i> instead
+    # (e.g. dist_fil_Q1), so the file names do not depend on the boundary values
+    if len(split_vars) == 1 and split_vars[0]['mode'] == 'quantiles':
+        col = re.sub(r'[^\w]', '', split_vars[0]['col'])
+        descs = [f"{col}_Q{i + 1}" for i in range(n_split)]
+    else:
+        descs = [make_bin_desc_from_label(lab) for lab in labels[:n_split]]
+    descs += [make_bin_desc_from_label(lab) for lab in labels[n_split:]]
+
     samples = [('Full Sample', 'full', cat, force_recompute_full)]
-    samples += [(lab, make_bin_desc_from_label(lab), g, force_recompute_bin)
-                for g, lab in zip(bins, labels)]
+    samples += [(lab, desc, g, force_recompute_bin) for g, lab, desc in zip(bins, labels, descs)]
     return samples
 
 
@@ -268,24 +291,38 @@ def main():
                             os.path.join(RAW_DIR, 'mock_withfilament.csv'))
     cat = select_sample(cat_full, mag_max)
     print(f"Selected {len(cat)} galaxies.")
-    if any(v['col'] == 'log_rho_3' for v in split_vars) and 'log_rho_3' not in cat.columns:
-        print("Computing rho_3 (distance to 3rd nearest neighbor)...")
-        nn_dist = compute_knn_distance(cat[['x', 'y', 'z']].values, k=3, boxsize=L)
-        cat['log_rho_3'] = np.log10(3 / ((4 * np.pi * nn_dist**3) / 3))
+    # local density log_rho_<k> for any split that uses it (k read from the column name)
+    for col in {v['col'] for v in split_vars}:
+        m = re.fullmatch(r'log_rho_(\d+)', col)
+        if m and col not in cat.columns:
+            k = int(m.group(1))
+            print(f"Computing rho_{k} (distance to the {k}-th nearest neighbour)...")
+            nn_dist = compute_knn_distance(cat[['x', 'y', 'z']].values, k=k, boxsize=L)
+            cat[col] = np.log10(k / ((4 * np.pi * nn_dist**3) / 3))
 
     # 2. Subsamples
     samples = make_samples(cat)
     print(f"Split into {len(samples) - 1} bins:")
-    for i, (lab, _, g, _) in enumerate(samples[1:]):
-        print(f"  Bin {i}: {len(g)} galaxies, {lab}")
+    for i, (lab, desc, g, _) in enumerate(samples[1:]):
+        print(f"  Bin {i}: {len(g)} galaxies, {lab}  [{desc}]")
 
-    # 3. Power spectra of all samples (labels = <bin_desc>, as in the monopole file names)
+    # quantile boundaries (1D quantile split), saved with the spectra for the tables and plots
+    q_col, q_edges = '', np.array([])
+    if len(split_vars) == 1 and split_vars[0]['mode'] == 'quantiles':
+        q_col = split_vars[0]['col']
+        q_edges = quantile_edges(cat[q_col].values, split_vars[0]['n_quantiles'])
+        print(f"Quantile boundaries of {q_col}: " + ", ".join(f"{e:.4g}" for e in q_edges))
+
+    # 3. Power spectra of all samples (labels = <bin_desc>, as in the monopole file names), saved
+    #    together with the quantile boundaries (split_col, split_edges; empty if not a quantile split)
     pk_labels = [desc for _, desc, _, _ in samples]
     pk_file = os.path.join(spectra_dir, f"pk_{run_name}.npz")
     if compute_spectra:
         print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
-        measure_spectra([g[['x', 'y', 'z']].values for _, _, g, _ in samples],
-                        pk_labels, L, ng=pk_ngrid, n_fold=pk_n_fold, kuse_frac=pk_kuse_frac, save=pk_file)
+        out = measure_spectra([g[['x', 'y', 'z']].values for _, _, g, _ in samples],
+                              pk_labels, L, ng=pk_ngrid, n_fold=pk_n_fold, kuse_frac=pk_kuse_frac, save=None)
+        np.savez(pk_file, **out, split_col=q_col, split_edges=q_edges)
+        print(f"Saved spectra of {pk_labels} -> {pk_file}")
 
     # 4. Monopoles
     results = []
