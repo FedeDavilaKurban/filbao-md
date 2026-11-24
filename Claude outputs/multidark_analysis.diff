@@ -1,0 +1,56 @@
+--- multidark_analysis.py.orig	2026-11-23 20:21:55.028932160 -0300
++++ multidark_analysis.py	2026-11-23 20:22:04.863552491 -0300
+@@ -94,6 +94,17 @@
+ # For a run that only adds the ensemble, compute_spectra = False and make_plots = False save time.
+ n_dilution_ensemble = 50
+ 
++# Cluster runs (scripts/run_dilution_ensemble.sbatch, a SLURM job array): each task computes only the
++# ensemble members FILBAO_ENS_FIRST..FILBAO_ENS_LAST (member j has seed dilution_seed +
++# n_dilution_realisations + j - 1, as above) and nothing else: no spectra, no monopoles of Full and the
++# bins, no plots, so tasks running at the same time never write the same file.  Unset: normal run.
++ens_only = os.environ.get('FILBAO_ENS_ONLY') == '1'
++if ens_only:
++    n_dilution_ensemble = int(os.environ['FILBAO_N_ENSEMBLE'])
++    ens_members = range(int(os.environ['FILBAO_ENS_FIRST']) - 1, int(os.environ['FILBAO_ENS_LAST']))
++else:
++    ens_members = range(n_dilution_ensemble)
++
+ # Power spectra (for the covariance of the BAO fit)
+ compute_spectra = False            # auto- and cross-spectra of Full + all bins (~1 min per fold level, ~1-2 GB)
+ pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
+@@ -335,7 +346,7 @@
+     #    together with the quantile split (split_col, split_edges, split_mode; empty if not a quantile split)
+     pk_labels = [desc for _, desc, _, _ in samples]
+     pk_file = os.path.join(spectra_dir, f"pk_{run_name}.npz")
+-    if compute_spectra:
++    if compute_spectra and not ens_only:
+         print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
+         out = measure_spectra([g[['x', 'y', 'z']].values for _, _, g, _ in samples],
+                               pk_labels, L, ng=pk_ngrid, n_fold=pk_n_fold, kuse_frac=pk_kuse_frac, save=None)
+@@ -344,7 +355,7 @@
+ 
+     # 4. Monopoles
+     results = []
+-    for lab, desc, gxs, force in samples:
++    for lab, desc, gxs, force in (samples if not ens_only else []):
+         print(f"Processing: {lab} -> {desc}")
+         results.append(measure_monopole(gxs, desc, force))
+ 
+@@ -352,7 +363,7 @@
+     if n_dilution_ensemble > 0:
+         n_targets = sorted({len(g) for lab, _, g, _ in samples if lab.startswith('Full random')})
+         for n_target in n_targets:
+-            for r in range(n_dilution_ensemble):
++            for r in ens_members:
+                 seed = dilution_seed + n_dilution_realisations + r
+                 idx = np.sort(np.random.default_rng(seed).choice(len(cat), size=n_target, replace=False))
+                 desc = make_bin_desc_from_label(f"Full random N={n_target} r{seed}")
+@@ -361,7 +372,7 @@
+                 measure_monopole(cat.iloc[idx], desc, force_recompute_bin)
+ 
+     # 5. Diagnostic plots
+-    if make_plots:
++    if make_plots and not ens_only:
+         make_diagnostic_plots(cat_full, samples, results, pk_file, pk_labels)
+ 
+     print("Analysis complete.")
