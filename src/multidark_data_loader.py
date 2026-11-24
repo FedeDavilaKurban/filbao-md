@@ -70,6 +70,7 @@ def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=
       'quantiles'            : n_quantiles equal-number bins Q1 (smallest values) ... Qn, half-open
                                e_i <= x < e_{i+1} (the last one closed) so that every galaxy is in
                                exactly one bin; e = quantile_edges(values, n_quantiles)
+      'cumulative_quantiles' : the sums Q1, Q1+Q2, ..., Q1+...+Q(n-1) of those bins (e_0 <= x < e_k)
     """
     col_tex = col_latex(col)
     masks, labels = [], []
@@ -96,6 +97,16 @@ def _get_1d_bins(values, col, mode, custom_intervals=None, percentile_intervals=
             masks.append((values >= e[i]) & ((values <= e[i + 1]) if last else (values < e[i + 1])))
             op = r'\leq' if last else '<'
             labels.append(f"Q{i + 1}: ${e[i]:.2f} \\leq {col_tex} {op} {e[i + 1]:.2f}$")
+    elif mode == "cumulative_quantiles":
+        # Q1, Q1+Q2, ..., Q1+...+Q(n-1): x < e_k for k = 1 ... n-1, with the same e as 'quantiles', so the
+        # first is exactly Q1 (all n quartiles would be the full sample, so that one is not made)
+        if n_quantiles is None:
+            raise ValueError("n_quantiles must be provided")
+        e = quantile_edges(values, n_quantiles)
+        for kq in range(1, n_quantiles):
+            masks.append((values >= e[0]) & (values < e[kq]))
+            name = '+'.join(f'Q{i}' for i in range(1, kq + 1))
+            labels.append(f"{name}: ${e[0]:.2f} \\leq {col_tex} < {e[kq]:.2f}$")
     else:
         raise ValueError(f"Unknown binning mode: {mode}")
     return masks, labels
@@ -105,7 +116,8 @@ def split_by_variable(cat, var_config):
     """
     Subsamples of `cat`.
     var_config: one dict, or a list of one or two dicts, each with
-        'col' (column name), 'mode' ('custom_intervals', 'percentile_intervals' or 'quantiles'),
+        'col' (column name), 'mode' ('custom_intervals', 'percentile_intervals', 'quantiles' or
+        'cumulative_quantiles'),
         and 'custom_intervals', 'percentile_intervals' or 'n_quantiles'.
     Two dicts give the cartesian product (e.g. filament x density); empty cells are skipped.
     Returns (bins, labels): list of DataFrames and their plot labels.
