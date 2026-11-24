@@ -9,6 +9,7 @@ FilBAO, plan steps 1-2: make the subsamples and measure xi_0(s) and P(k) for eac
     4. Auto- and cross-power spectra of all of them in one file, data/processed/pk/box/
        (folded at high k), used by src/bao_fitting.py for the covariance of the fit; the
        error bands of the plots use that same covariance.
+       Optional dilution ensemble (n_dilution_ensemble): more random dilutions, monopole only.
     5. Optional diagnostic plots (make_plots), in figures/diagnostics/<run name>/.
 
 One run per split.  Current plan: two 1D runs, quartiles Q1-Q4 of dist_fil, then quartiles of
@@ -59,11 +60,13 @@ rho_col = f'log_rho_{knn_k}'
 
 # Split configuration (one or two variables; two -> all combinations)
 #   'quantiles' : n_quantiles equal-number bins Q1 (smallest values) ... Qn
+#   'cumulative_quantiles' : their sums Q1, Q1+Q2, ..., Q1+...+Q(n-1) (same boundaries; run name ..._cumQ<n>);
+#                 set dilution_controls = 'all' for it, so that each sum gets a control of its own N
 #   for the density run, replace 'dist_fil' by rho_col
 split_vars = [
     {
         'col': 'dist_fil',
-        'mode': 'quantiles',
+        'mode': 'cumulative_quantiles',
         'n_quantiles': 4
     },
 ]
@@ -78,19 +81,39 @@ split_vars = [
 #   'all' : one control per bin      [0, 1] : only for these bins (index in the split)      [] : none
 # The seed is part of the file name, so changing it never reuses old pair counts.
 # Quantile bins all have N/n_quantiles galaxies (to within one), so one control serves them all: [0].
-dilution_controls = [0]
+# Cumulative quantiles have N/n, 2N/n, ...: 'all' (the N/n control is the same file as the quartile run's).
+dilution_controls = 'all'
 n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...)
 dilution_seed = 20261016
 
+# Dilution ensemble (desilike_fits.ipynb, section 5c): n_dilution_ensemble more random dilutions of
+# Full, each with the N of a control above, seeds following the controls' (dilution_seed +
+# n_dilution_realisations, + 1, ...).  Monopoles only: they are not added to the spectra file or the
+# plots (the notebook fits them with the control's covariance: same N, same parent sample).  The
+# files depend only on N and the seed, so a later run with the same N reuses them.   0: none.
+# For a run that only adds the ensemble, compute_spectra = False and make_plots = False save time.
+n_dilution_ensemble = 50
+
+# Cluster runs (scripts/run_dilution_ensemble.sbatch, a SLURM job array): each task computes only the
+# ensemble members FILBAO_ENS_FIRST..FILBAO_ENS_LAST (member j has seed dilution_seed +
+# n_dilution_realisations + j - 1, as above) and nothing else: no spectra, no monopoles of Full and the
+# bins, no plots, so tasks running at the same time never write the same file.  Unset: normal run.
+ens_only = os.environ.get('FILBAO_ENS_ONLY') == '1'
+if ens_only:
+    n_dilution_ensemble = int(os.environ['FILBAO_N_ENSEMBLE'])
+    ens_members = range(int(os.environ['FILBAO_ENS_FIRST']) - 1, int(os.environ['FILBAO_ENS_LAST']))
+else:
+    ens_members = range(n_dilution_ensemble)
+
 # Power spectra (for the covariance of the BAO fit)
-compute_spectra = True            # auto- and cross-spectra of Full + all bins (~1 min per fold level, ~1-2 GB)
+compute_spectra = False            # auto- and cross-spectra of Full + all bins (~1 min per fold level, ~1-2 GB)
 pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
 pk_n_fold = 2                     # foldings of the box (each doubles the k reach at the same memory)
 pk_kuse_frac = 0.6                # each fold level is used up to this fraction of its Nyquist frequency
                                   # (384, 2, 0.6 -> measured to k = 2.9 h/Mpc)
 
 # Diagnostic plots
-make_plots = True                 # magnitude histogram, sample maps, xi(s, mu), xi_0, xi(s), ratio
+make_plots = False                 # magnitude histogram, sample maps, xi(s, mu), xi_0, xi(s), ratio
 plot_errors = True                # error bands on xi_0 and xi(s): the covariance of the BAO fit
                                   # (bao_fitting.gaussian_cov_pk), from the measured spectra
 
@@ -107,7 +130,8 @@ spectra_dir = os.path.join(PROC_DIR, 'pk', 'box')
 def split_tag(v):
     """Part of the run name for one split variable: its column, plus _Q<n> for a quantile split."""
     tag = re.sub(r'[^\w]', '', v['col'])
-    return tag + (f"_Q{v['n_quantiles']}" if v['mode'] == 'quantiles' else '')
+    return tag + {'quantiles': f"_Q{v['n_quantiles']}",
+                  'cumulative_quantiles': f"_cumQ{v['n_quantiles']}"}.get(v['mode'], '')
 
 
 split_cols = "".join(split_tag(v) for v in split_vars)      # e.g. dist_fil_Q4, log_rho_10_Q4
@@ -164,10 +188,14 @@ def make_samples(cat):
         labels = list(labels) + new_labels
 
     # <bin_desc>: from the label; for a 1D quantile split, <split tag without _Q<n>>_Q<i> instead
-    # (e.g. dist_fil_Q1), so the file names do not depend on the boundary values
+    # (e.g. dist_fil_Q1), so the file names do not depend on the boundary values; for cumulative
+    # quantiles <col>_Q1, <col>_Q1-Q2, ... (the first is the same sample, and file, as the quantile Q1)
     if len(split_vars) == 1 and split_vars[0]['mode'] == 'quantiles':
         col = re.sub(r'[^\w]', '', split_vars[0]['col'])
         descs = [f"{col}_Q{i + 1}" for i in range(n_split)]
+    elif len(split_vars) == 1 and split_vars[0]['mode'] == 'cumulative_quantiles':
+        col = re.sub(r'[^\w]', '', split_vars[0]['col'])
+        descs = [f"{col}_Q1" + (f"-Q{i + 1}" if i else '') for i in range(n_split)]
     else:
         descs = [make_bin_desc_from_label(lab) for lab in labels[:n_split]]
     descs += [make_bin_desc_from_label(lab) for lab in labels[n_split:]]
@@ -307,31 +335,44 @@ def main():
         print(f"  Bin {i}: {len(g)} galaxies, {lab}  [{desc}]")
 
     # quantile boundaries (1D quantile split), saved with the spectra for the tables and plots
-    q_col, q_edges = '', np.array([])
-    if len(split_vars) == 1 and split_vars[0]['mode'] == 'quantiles':
+    q_col, q_edges, q_mode = '', np.array([]), ''
+    if len(split_vars) == 1 and split_vars[0]['mode'] in ('quantiles', 'cumulative_quantiles'):
+        q_mode = split_vars[0]['mode']
         q_col = split_vars[0]['col']
         q_edges = quantile_edges(cat[q_col].values, split_vars[0]['n_quantiles'])
         print(f"Quantile boundaries of {q_col}: " + ", ".join(f"{e:.4g}" for e in q_edges))
 
     # 3. Power spectra of all samples (labels = <bin_desc>, as in the monopole file names), saved
-    #    together with the quantile boundaries (split_col, split_edges; empty if not a quantile split)
+    #    together with the quantile split (split_col, split_edges, split_mode; empty if not a quantile split)
     pk_labels = [desc for _, desc, _, _ in samples]
     pk_file = os.path.join(spectra_dir, f"pk_{run_name}.npz")
-    if compute_spectra:
+    if compute_spectra and not ens_only:
         print(f"\nMeasuring auto/cross power spectra of {pk_labels} ...")
         out = measure_spectra([g[['x', 'y', 'z']].values for _, _, g, _ in samples],
                               pk_labels, L, ng=pk_ngrid, n_fold=pk_n_fold, kuse_frac=pk_kuse_frac, save=None)
-        np.savez(pk_file, **out, split_col=q_col, split_edges=q_edges)
+        np.savez(pk_file, **out, split_col=q_col, split_edges=q_edges, split_mode=q_mode)
         print(f"Saved spectra of {pk_labels} -> {pk_file}")
 
     # 4. Monopoles
     results = []
-    for lab, desc, gxs, force in samples:
+    for lab, desc, gxs, force in (samples if not ens_only else []):
         print(f"Processing: {lab} -> {desc}")
         results.append(measure_monopole(gxs, desc, force))
 
+    # 4b. Dilution ensemble: more random dilutions of Full, monopoles only (not in the spectra or plots)
+    if n_dilution_ensemble > 0:
+        n_targets = sorted({len(g) for lab, _, g, _ in samples if lab.startswith('Full random')})
+        for n_target in n_targets:
+            for r in ens_members:
+                seed = dilution_seed + n_dilution_realisations + r
+                idx = np.sort(np.random.default_rng(seed).choice(len(cat), size=n_target, replace=False))
+                desc = make_bin_desc_from_label(f"Full random N={n_target} r{seed}")
+                print(f"Dilution ensemble {r + 1}/{n_dilution_ensemble}: {n_target} of {len(cat)} Full "
+                      f"galaxies, seed {seed} -> {desc}")
+                measure_monopole(cat.iloc[idx], desc, force_recompute_bin)
+
     # 5. Diagnostic plots
-    if make_plots:
+    if make_plots and not ens_only:
         make_diagnostic_plots(cat_full, samples, results, pk_file, pk_labels)
 
     print("Analysis complete.")
