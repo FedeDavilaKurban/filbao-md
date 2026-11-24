@@ -34,7 +34,7 @@
 # ---------------- settings ---------------------------------------------------------------------------
 N_MEMBERS=499                         # members j = 1..N_MEMBERS (plus the original dilution = 500)
 CHUNK=10                              # members per task; --array must cover 0..ceil(N_MEMBERS/CHUNK)-1
-CONDA_ENV=filbao                      # env on clemente with numpy, pandas, scipy, Corrfunc, ...
+CONDA_ENV=filbao2                     # env on clemente with numpy, pandas, scipy, Corrfunc, ...
 CODES_DIR=$SLURM_SUBMIT_DIR           # the codes/ folder (submit from there)
 # -----------------------------------------------------------------------------------------------------
 
