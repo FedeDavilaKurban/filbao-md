@@ -37,7 +37,7 @@ CONDA_ENV=filbao2                     # env on clemente with numpy, pandas, scip
 CODES_DIR=$SLURM_SUBMIT_DIR           # the codes/ folder (submit from there)
 # -----------------------------------------------------------------------------------------------------
 
-set -euo pipefail
+set -eo pipefail
 
 FIRST=$(( SLURM_ARRAY_TASK_ID * CHUNK + 1 ))
 LAST=$(( FIRST + CHUNK - 1 ))
