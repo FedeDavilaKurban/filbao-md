@@ -26,7 +26,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16           # = the 16 threads Corrfunc takes on a 56-thread node (3 tasks per node)
-#SBATCH --mem=16G
 #SBATCH --array=0-49%12              # 50 tasks, at most 12 at once (leaves the cluster usable for others)
 #SBATCH --output=logs/dil_%A_%a.out
 #SBATCH --error=logs/dil_%A_%a.err
