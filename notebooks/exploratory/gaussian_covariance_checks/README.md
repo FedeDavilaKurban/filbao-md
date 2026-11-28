@@ -14,6 +14,15 @@ Checked on synthetic catalogues before use: a clumpy sample (clumps of ~8 galaxi
 ⟨χ²⟩/n = 4.65, so the test detects a wrong noise model. With 50 splits it resolves about a 6% error in the noise
 covariance at 2σ.
 
+## lowk_spectrum_model.ipynb
+
+The covariance sums over the box's modes from the fundamental k_f = 2π/L ≈ 0.0063 h/Mpc up, and uses the measured
+spectrum there. The lowest lattice shells hold few modes (6, 12, 8 at k = 0.0063, 0.0089, 0.0109), so their measured
+power scatters by tens of per cent, in the same direction for all samples (shared box modes). This notebook replaces
+the measured spectrum below `k_model` by A (b²P_lin + N), with A the mode-weighted mean of P̂ / (b²P_lin + N) over a
+low-k window, refits α, Σ and w with both covariances (settings and fits of `desilike_fits.ipynb`), and compares.
+It tests the signal (cosmic-variance) part of the covariance at low k, which the random-halves test cannot see.
+
 ## Why there is no jackknife test
 
 Considered: compare jackknife / Gaussian variance ratios of Fil and of its random control, expecting the jackknife's bias

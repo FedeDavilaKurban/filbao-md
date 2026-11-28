@@ -65,8 +65,8 @@ rho_col = f'log_rho_{knn_k}'
 #   for the density run, replace 'dist_fil' by rho_col
 split_vars = [
     {
-        'col': 'dist_fil',
-        'mode': 'cumulative_quantiles',
+        'col': rho_col,
+        'mode': 'quantiles',
         'n_quantiles': 4
     },
 ]
@@ -82,7 +82,7 @@ split_vars = [
 # The seed is part of the file name, so changing it never reuses old pair counts.
 # Quantile bins all have N/n_quantiles galaxies (to within one), so one control serves them all: [0].
 # Cumulative quantiles have N/n, 2N/n, ...: 'all' (the N/n control is the same file as the quartile run's).
-dilution_controls = 'all'
+dilution_controls = [0]
 n_dilution_realisations = 1       # > 1: independent controls (seed, seed+1, ...)
 dilution_seed = 20261016
 
@@ -106,7 +106,7 @@ else:
     ens_members = range(n_dilution_ensemble)
 
 # Power spectra (for the covariance of the BAO fit)
-compute_spectra = False            # auto- and cross-spectra of Full + all bins (~1 min per fold level, ~1-2 GB)
+compute_spectra = True             # auto- and cross-spectra of Full + all bins (~1 min per fold level, ~1-2 GB)
 pk_ngrid = 384                    # FFT grid per side (k_Nyquist = 1.2 h/Mpc for L = 1000)
 pk_n_fold = 2                     # foldings of the box (each doubles the k reach at the same memory)
 pk_kuse_frac = 0.6                # each fold level is used up to this fraction of its Nyquist frequency
